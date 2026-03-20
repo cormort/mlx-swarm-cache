@@ -55,26 +55,35 @@ mlx-swarm-cache/
     └── test_cache_eviction.py      # 驗證 RAM 滿載時卸載行為
 ```
 
-## 快速啟動 (Quickstart)
+## 部署與執行說明 (Deployment Guide)
 
-### 安裝依賴
+### 1. 準備環境 (所有節點)
+
+首先在所有預定運行的 Mac 上複製專案並安裝依賴模組：
 
 ```bash
+git clone https://github.com/cormort/mlx-swarm-cache.git
+cd mlx-swarm-cache
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 啟動 Node 1（例如 Mac mini M4，負責 Layer 0-15）
+### 2. 啟動 Worker 節點 (Worker Nodes)
 
+每台 Mac (或同機器的不同 Process) 負責處理不同範圍的神經網路層 (`START_LAYER` 到 `END_LAYER`)。
+
+#### 在 Node 1 (例如 Mac mini M4, 負責前 16 層)
 ```bash
 export NODE_ID="mac_mini_m4"
 export START_LAYER=0
 export END_LAYER=16
 export PORT=8000
+# 監聽所有網卡 0.0.0.0 (便於跨機器連線)
 python -m src.node.api_server
 ```
 
-### 啟動 Node 2（例如 MacBook Air，負責 Layer 16-31）
-
+#### 在 Node 2 (例如 MacBook Air, 負責後 16 層)
 ```bash
 export NODE_ID="macbook_air"
 export START_LAYER=16
@@ -83,9 +92,21 @@ export PORT=8001
 python -m src.node.api_server
 ```
 
-### 啟動指揮官（在 Node 1 或獨立機器上執行）
+> **注意**：若是跨機器部署（Multi-Node），請確認各機器的防火牆 (Firewall) 允許對應 `PORT` 的 TCP 連線傳輸。
+
+### 3. 啟動指揮官 (Coordinator)
+
+Coordinator 負責發送 Prompt 並統籌網路間的推論接力。預設會嘗試連線到本地的 Port 8000 與 8001。
+若是跨機器部署，請依據 Worker 節點的真實區域網路 IP，透過 `NODE_URLS` 環境變數自訂節點清單 (以逗號分隔)：
 
 ```bash
+# 跨機器範例 (假設 Node 1 在 localhost，Node 2 在 192.168.1.100)
+export NODE_URLS="http://localhost:8000/forward,http://192.168.1.100:8001/forward"
+
+# 單機雙節點範例 (不指定預設就是連線上述的 8000 與 8001)
+# export NODE_URLS="http://localhost:8000/forward,http://localhost:8001/forward"
+
+# 啟動指揮官開始產生推論
 python -m src.orchestrator.coordinator
 ```
 
