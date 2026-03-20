@@ -1,0 +1,11 @@
+# Python 暫存檔
+__pycache__/
+*.py[cod]
+.Python
+env/
+venv/
+.env
+
+# 專案產生的 SSD Cache 目錄
+*_cache/
+*.safetensors
