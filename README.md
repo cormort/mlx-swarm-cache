@@ -94,20 +94,38 @@ python -m src.node.api_server
 
 > **注意**：若是跨機器部署（Multi-Node），請確認各機器的防火牆 (Firewall) 允許對應 `PORT` 的 TCP 連線傳輸。
 
-### 3. 啟動指揮官 (Coordinator)
+### 3. 啟動指揮官 (Coordinator API Gateway)
 
-Coordinator 負責發送 Prompt 並統籌網路間的推論接力。預設會嘗試連線到本地的 Port 8000 與 8001。
-若是跨機器部署，請依據 Worker 節點的真實區域網路 IP，透過 `NODE_URLS` 環境變數自訂節點清單 (以逗號分隔)：
+Coordinator 現已升級為一個 **OpenAI 相容的 FastAPI 伺服器**。它負責接收外部 `/v1/chat/completions` 請求，轉譯成特徵矩陣後統籌內部 Worker 網路的推論接力。
+
+啟動前，您可以透過 `NODE_URLS` 設定內部 Worker 的 IP，並利用 `API_KEY` 環境變數開啟簡單的身分驗證保護：
 
 ```bash
-# 跨機器範例 (假設 Node 1 在 localhost，Node 2 在 192.168.1.100)
-export NODE_URLS="http://localhost:8000/forward,http://192.168.1.100:8001/forward"
+# 設定內部 Worker 節點清單 (單機不指定預設就是連 8000 和 8001)
+export NODE_URLS="http://localhost:8000/forward,http://localhost:8001/forward"
 
-# 單機雙節點範例 (不指定預設就是連線上述的 8000 與 8001)
-# export NODE_URLS="http://localhost:8000/forward,http://localhost:8001/forward"
+# [選填] 設定外部呼叫的 API Key
+export API_KEY="sk-my-secret-key-123"
 
-# 啟動指揮官開始產生推論
+# 預設監聽 0.0.0.0:8080
+export COORDINATOR_PORT=8080 
 python -m src.orchestrator.coordinator
+```
+
+### 4. 外部呼叫推論 (OpenAI Format)
+
+當 Coordinator 啟動後，任何外部應用程式（包含支援 OpenAI Base URL 格式的套件或網頁 UI）即可像呼叫 ChatGPT API 一樣打向 Coordinator。
+
+**Curl 測試範例：**
+```bash
+curl -X POST "http://localhost:8080/v1/chat/completions" \
+     -H "Content-Type: application/json" \
+     -H "Authorization: Bearer sk-my-secret-key-123" \
+     -d '{
+       "model": "mlx-swarm-cache",
+       "messages": [{"role": "user", "content": "請幫我寫一個結合 omlx 與 exo 的架構..."}],
+       "max_tokens": 5
+     }'
 ```
 
 ## 測試項目與結果 (Test Cases and Results)

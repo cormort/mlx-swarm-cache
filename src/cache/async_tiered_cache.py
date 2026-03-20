@@ -31,6 +31,7 @@ import mlx.core as mx
 # 步驟一：同步版本（概念驗證用）
 # ─────────────────────────────────────────────
 
+
 class TieredKVCache:
     def __init__(self, max_ram_blocks: int = 3, cache_dir: str = "./omlx_ssd_cache"):
         self.max_ram_blocks = max_ram_blocks
@@ -99,6 +100,7 @@ class TieredKVCache:
 # 步驟三：非同步版本（生產用）
 # ─────────────────────────────────────────────
 
+
 class AsyncTieredKVCache:
     """
     升級版分層 KV Cache。
@@ -114,7 +116,7 @@ class AsyncTieredKVCache:
     """
 
     _SSD_WAIT_TIMEOUT: float = 10.0
-    _SSD_WAIT_POLL:    float = 0.005
+    _SSD_WAIT_POLL: float = 0.005
 
     def __init__(
         self,
@@ -157,10 +159,10 @@ class AsyncTieredKVCache:
         """自有執行緒時使用。消費 Queue 中的寫入任務並呼叫 on_written 回呼。"""
         while True:
             task = self.io_queue.get()
-            if task is None:          # Poison Pill
+            if task is None:  # Poison Pill
                 self.io_queue.task_done()
                 break
-                
+
             # 原始寫入任務格式 (block_id, tensors, filepath, on_written)
             block_id, tensors, filepath, on_written = task
             start_write = time.time()
@@ -188,7 +190,7 @@ class AsyncTieredKVCache:
         為了確保 MLX 執行緒安全，核心的卸載邏輯實作了以下保護機制：
         1. 獲取 Lock，從 RAM 移除 LRU (最近最少使用) 的 Block。
         2. 將被挑選的 LRU Block 放回 `pending_ssd` 中，供讀取端追蹤狀態。
-        3. 釋放 Lock，然後在主執行緒中安全地呼叫 `mx.eval()` 具體化張量 
+        3. 釋放 Lock，然後在主執行緒中安全地呼叫 `mx.eval()` 具體化張量
            (避免推延求值造成崩潰)。
         4. 最終將張量透過 `io_queue` 送入背景執行緒寫入磁碟 (safetensors 格式)。
 
@@ -246,7 +248,7 @@ class AsyncTieredKVCache:
                 return self.ram_cache[block_id]["k"], self.ram_cache[block_id]["v"]
             # 在鎖內快照，在鎖外執行耗時 I/O
             in_pending = block_id in self.pending_ssd
-            in_ssd     = block_id in self.ssd_index
+            in_ssd = block_id in self.ssd_index
 
         if in_pending or in_ssd:
             k_tensor, v_tensor = self._sync_load_from_ssd(block_id)

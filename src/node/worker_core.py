@@ -58,7 +58,7 @@ class ExoWorkerNode:
                 self.layer_caches[layer_idx] = AsyncTieredKVCache(
                     max_ram_blocks=max_ram_blocks,
                     cache_dir=f"./{self.node_id}_cache/layer_{layer_idx}",
-                    io_queue=self._shared_io_queue,   # 共用 Queue
+                    io_queue=self._shared_io_queue,  # 共用 Queue
                 )
         except Exception:
             self.shutdown()
@@ -80,6 +80,7 @@ class ExoWorkerNode:
             start_write = time.time()
             try:
                 import mlx.core as _mx
+
                 _mx.save_safetensors(filepath, tensors)
             except Exception as e:
                 print(f"  [共用 I/O] ❌ Block {block_id} 寫入失敗: {e}")
@@ -105,9 +106,9 @@ class ExoWorkerNode:
 
         在經過每一層時：
         1. 模擬產生該層專屬的 K/V 狀態 (Key/Value states)。
-        2. 將 K/V 狀態交由 `AsyncTieredKVCache` 存入 RAM 
+        2. 將 K/V 狀態交由 `AsyncTieredKVCache` 存入 RAM
            (滿載時自動於背景卸載到 SSD)。
-        3. 從快取中讀回歷史 context 以進行 Attention 計算 
+        3. 從快取中讀回歷史 context 以進行 Attention 計算
            (若已卸載，則同步從 SSD 載回)。
         4. 最終呼叫 `mx.eval(x)` 確保所有延遲計算在本節點完成。
 

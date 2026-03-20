@@ -50,8 +50,7 @@ worker = ExoWorkerNode(
 app = FastAPI(
     title="MLX-Swarm-Cache Worker",
     description=(
-        f"Worker node [{NODE_ID}] handling layers "
-        f"{START_LAYER}-{END_LAYER - 1}"
+        f"Worker node [{NODE_ID}] handling layers {START_LAYER}-{END_LAYER - 1}"
     ),
     version="0.1.0",
 )
@@ -61,6 +60,7 @@ app = FastAPI(
 # ─────────────────────────────────────────────
 # 端點
 # ─────────────────────────────────────────────
+
 
 @app.get("/health")
 async def health_check():
@@ -90,12 +90,12 @@ async def forward_pass(request: Request):
         Response: 包裝著 msgpack 序列化資料的原始 HTTP Response。
     """
     start_time = time.time()
-    
+
     try:
         raw_body = await request.body()
         data = msgpack.unpackb(raw_body, raw=False)
         block_id = data["block_id"]
-        
+
         print(f"\n[{NODE_ID}] 🌐 收到 API 請求，處理 Block: {block_id}")
 
         # 1. 反序列化：bytes -> numpy -> MLX Tensor
@@ -103,10 +103,10 @@ async def forward_pass(request: Request):
         shape = tuple(data["shape"])
         dtype_str = data["dtype"]
         np_dtype = np.dtype(dtype_str)
-        
-        np_array = np.frombuffer(
-            data["hidden_states_bytes"], dtype=np_dtype
-        ).reshape(shape)
+
+        np_array = np.frombuffer(data["hidden_states_bytes"], dtype=np_dtype).reshape(
+            shape
+        )
         hidden_states_tensor = mx.array(np_array)
 
         # 2. 執行推理（含自動 SSD KV Cache 管理）
@@ -127,7 +127,7 @@ async def forward_pass(request: Request):
             "dtype": str(out_np.dtype),
             "compute_time_ms": compute_time_ms,
         }
-        
+
         packed_response = msgpack.packb(response_data, use_bin_type=True)
         return Response(content=packed_response, media_type="application/msgpack")
 

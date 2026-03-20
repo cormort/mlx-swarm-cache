@@ -44,8 +44,8 @@ def tmp_dir():
 # TieredKVCache（同步版）
 # ─────────────────────────────────────────────
 
-class TestTieredKVCache:
 
+class TestTieredKVCache:
     def test_ram_hit(self, tmp_dir):
         cache = TieredKVCache(max_ram_blocks=3, cache_dir=tmp_dir)
         k, v = make_tensors()
@@ -59,7 +59,7 @@ class TestTieredKVCache:
         cache = TieredKVCache(max_ram_blocks=2, cache_dir=tmp_dir)
         cache.put_block("A", *make_tensors())
         cache.put_block("B", *make_tensors())
-        cache.put_block("C", *make_tensors())   # A 應被踢到 SSD
+        cache.put_block("C", *make_tensors())  # A 應被踢到 SSD
         assert "A" not in cache.ram_cache
         assert "A" in cache.ssd_index
         assert len(cache.ram_cache) == 2
@@ -83,8 +83,8 @@ class TestTieredKVCache:
         cache = TieredKVCache(max_ram_blocks=2, cache_dir=tmp_dir)
         cache.put_block("A", *make_tensors())
         cache.put_block("B", *make_tensors())
-        cache.get_block("A")                    # A 成為最近使用
-        cache.put_block("C", *make_tensors())   # B 應被踢走
+        cache.get_block("A")  # A 成為最近使用
+        cache.put_block("C", *make_tensors())  # B 應被踢走
         assert "B" in cache.ssd_index
         assert "A" in cache.ram_cache
         assert "C" in cache.ram_cache
@@ -92,7 +92,7 @@ class TestTieredKVCache:
     def test_safetensors_file_created(self, tmp_dir):
         cache = TieredKVCache(max_ram_blocks=1, cache_dir=tmp_dir)
         cache.put_block("A", *make_tensors())
-        cache.put_block("B", *make_tensors())   # A 被卸載
+        cache.put_block("B", *make_tensors())  # A 被卸載
         filepath = os.path.join(tmp_dir, "block_A.safetensors")
         assert os.path.exists(filepath)
 
@@ -102,7 +102,7 @@ class TestTieredKVCache:
         """block_id 含 ../ 時，檔案應仍在 cache_dir 內（Security 修正）。"""
         cache = TieredKVCache(max_ram_blocks=1, cache_dir=tmp_dir)
         cache.put_block("A", *make_tensors())
-        cache.put_block("../evil", *make_tensors())   # 觸發卸載 A
+        cache.put_block("../evil", *make_tensors())  # 觸發卸載 A
         # 如果路徑穿越沒被過濾，block_A 會被寫到 tmp_dir 以外
         # 這裡只要確認 cache_dir 外沒有出現 evil 相關檔案
         parent = os.path.dirname(tmp_dir)
@@ -114,18 +114,18 @@ class TestTieredKVCache:
 # AsyncTieredKVCache（非同步版）
 # ─────────────────────────────────────────────
 
-class TestAsyncTieredKVCache:
 
+class TestAsyncTieredKVCache:
     def test_async_eviction_does_not_block(self, tmp_dir):
         """
         非同步卸載的主執行緒耗時應遠小於一次磁碟寫入（Bug #1 修正驗證）。
         量測單次 put_block（觸發卸載）的耗時，應 < 100 ms。
         """
         cache = AsyncTieredKVCache(max_ram_blocks=1, cache_dir=tmp_dir)
-        cache.put_block("warm", *make_tensors())   # 填滿 RAM
+        cache.put_block("warm", *make_tensors())  # 填滿 RAM
 
         start = time.time()
-        cache.put_block("new", *make_tensors())    # 觸發非同步卸載
+        cache.put_block("new", *make_tensors())  # 觸發非同步卸載
         elapsed_ms = (time.time() - start) * 1000
 
         cache.shutdown()
@@ -139,7 +139,7 @@ class TestAsyncTieredKVCache:
         """
         cache = AsyncTieredKVCache(max_ram_blocks=1, cache_dir=tmp_dir)
         cache.put_block("A", *make_tensors())
-        cache.put_block("B", *make_tensors())   # A 被非同步卸載
+        cache.put_block("B", *make_tensors())  # A 被非同步卸載
 
         # 此時 A 可能仍在寫入途中，正確行為是等待落盤後回傳，不拋例外
         try:
@@ -174,7 +174,8 @@ class TestAsyncTieredKVCache:
 
         # 模擬 save_safetensors 避免 MLX 引擎在極端壓力下 Segmentation fault
         import unittest.mock
-        with unittest.mock.patch('mlx.core.save_safetensors'):
+
+        with unittest.mock.patch("mlx.core.save_safetensors"):
             threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
             for t in threads:
                 t.start()
@@ -188,8 +189,8 @@ class TestAsyncTieredKVCache:
         """背景 I/O 完成後，SSD 上應出現對應檔案。"""
         cache = AsyncTieredKVCache(max_ram_blocks=1, cache_dir=tmp_dir)
         cache.put_block("X", *make_tensors())
-        cache.put_block("Y", *make_tensors())   # X 被非同步卸載
-        cache.io_queue.join()                   # 等待所有任務完成
+        cache.put_block("Y", *make_tensors())  # X 被非同步卸載
+        cache.io_queue.join()  # 等待所有任務完成
         filepath = os.path.join(tmp_dir, "block_X.safetensors")
         assert os.path.exists(filepath)
         cache.shutdown()
@@ -216,8 +217,8 @@ class TestAsyncTieredKVCache:
 # Coordinator NODE_URLS 解析（Bug #3 修正驗證）
 # ─────────────────────────────────────────────
 
-class TestCoordinatorNodeUrls:
 
+class TestCoordinatorNodeUrls:
     def test_node_urls_parsed_from_env(self, monkeypatch):
         """NODE_URLS 環境變數應能正確解析為超過兩個節點的清單。"""
         three_nodes = (
@@ -231,6 +232,7 @@ class TestCoordinatorNodeUrls:
         import importlib
 
         import src.orchestrator.coordinator as coord
+
         importlib.reload(coord)
 
         assert len(coord.NODE_URLS) == 3
@@ -240,11 +242,12 @@ class TestCoordinatorNodeUrls:
         """URL 之間的空白應被自動去除。"""
         monkeypatch.setenv(
             "NODE_URLS",
-            "  http://localhost:8000/forward ,  http://localhost:8001/forward  "
+            "  http://localhost:8000/forward ,  http://localhost:8001/forward  ",
         )
         import importlib
 
         import src.orchestrator.coordinator as coord
+
         importlib.reload(coord)
 
         assert all(" " not in url for url in coord.NODE_URLS)
