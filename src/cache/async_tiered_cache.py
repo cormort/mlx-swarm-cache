@@ -19,13 +19,13 @@ async_tiered_cache.py — 分層 KV Cache（含同步與非同步版本）
     同時競爭磁碟頻寬。
 """
 
-import mlx.core as mx
 import os
-import time
-import threading
 import queue
+import threading
+import time
 from collections import OrderedDict
 
+import mlx.core as mx
 
 # ─────────────────────────────────────────────
 # 步驟一：同步版本（概念驗證用）
@@ -160,6 +160,8 @@ class AsyncTieredKVCache:
             if task is None:          # Poison Pill
                 self.io_queue.task_done()
                 break
+                
+            # 原始寫入任務格式 (block_id, tensors, filepath, on_written)
             block_id, tensors, filepath, on_written = task
             start_write = time.time()
             try:
@@ -179,12 +181,31 @@ class AsyncTieredKVCache:
     # ── 公開 API ──────────────────────────────
 
     def put_block(self, block_id: str, k_tensor: mx.array, v_tensor: mx.array) -> None:
+        evict_task = None
         with self._lock:
             if block_id in self.ram_cache:
                 del self.ram_cache[block_id]
             self.ram_cache[block_id] = {"k": k_tensor, "v": v_tensor}
             if len(self.ram_cache) > self.max_ram_blocks:
-                self._async_evict_lru_to_ssd_locked()
+                # 取得要卸載的任務，但在鎖外執行 mx.eval
+                lru_block_id, tensors = self.ram_cache.popitem(last=False)
+                filepath = self._get_filepath(lru_block_id)
+                self.pending_ssd.add(lru_block_id)
+                evict_task = (lru_block_id, tensors, filepath)
+
+        if evict_task:
+            bid, ts, fp = evict_task
+            try:
+                mx.eval(ts["k"], ts["v"])
+                self.io_queue.put((bid, ts, fp, self._on_written))
+                print(
+                    f"  ⚡️ [主執行緒] 已將 Block {bid} 的卸載任務"
+                    " 派發給背景 Queue，繼續全速運算！"
+                )
+            except Exception as e:
+                print(f"  [主執行緒] ❌ Block {bid} 預處理失敗: {e}")
+                with self._lock:
+                    self.pending_ssd.discard(bid)
 
     def get_block(self, block_id: str):
         """
@@ -203,16 +224,28 @@ class AsyncTieredKVCache:
             in_ssd     = block_id in self.ssd_index
 
         if in_pending or in_ssd:
-            return self._sync_load_from_ssd(block_id)
+            k_tensor, v_tensor = self._sync_load_from_ssd(block_id)
+            self.put_block(block_id, k_tensor, v_tensor)
+            return k_tensor, v_tensor
 
         return None, None
 
     def shutdown(self) -> None:
         """優雅關閉背景執行緒（僅在 _owns_thread 時有效）。"""
         if self._owns_thread:
+            # 加入 None 毒藥讓 I/O 執行緒停止
             self.io_queue.put(None)
             self.io_thread.join()
             print("🛑 背景 SSD 執行緒已安全關閉。")
+
+    def prefetch_block(self, block_id: str) -> bool:
+        """
+        [廢棄] 由於 MLX `mx.load` 在背景執行緒與主執行緒同時操作資源時，
+        容易觸發 Segmentation Fault，因此在此實作中移除背景預載 MLX 張量功能。
+        實際上，作業系統的檔案系統快取 (Page Cache) 已經能提供基礎的預取效果。
+        """
+        # (保留 API 介面但不進行背景操作)
+        return False
 
     # ── 私有方法 ──────────────────────────────
 
@@ -222,24 +255,7 @@ class AsyncTieredKVCache:
             self.ssd_index.add(block_id)
             self.pending_ssd.discard(block_id)
 
-    def _async_evict_lru_to_ssd_locked(self) -> None:
-        """
-        非同步卸載（必須在 _lock 持有狀態下呼叫）。
-
-        1. 從 RAM 移除 LRU block
-        2. mx.eval() 確保 tensor 具體化，背景執行緒不會觸發 lazy evaluation
-        3. 加入 pending_ssd（在入隊前），讓 get_block() 知道要等
-        4. 派發任務到 Queue 後立即返回
-        """
-        lru_block_id, tensors = self.ram_cache.popitem(last=False)
-        filepath = self._get_filepath(lru_block_id)
-        mx.eval(tensors["k"], tensors["v"])          # ⚠️ 必須在派發前求值
-        self.pending_ssd.add(lru_block_id)           # 先標記，再入隊
-        self.io_queue.put((lru_block_id, tensors, filepath, self._on_written))
-        print(
-            f"  ⚡️ [主執行緒] 已將 Block {lru_block_id} 的卸載任務"
-            " 派發給背景 Queue，繼續全速運算！"
-        )
+    # def _async_evict_lru_to_ssd_locked(self) -> None: (Removed)
 
     def _sync_load_from_ssd(self, block_id: str):
         """
@@ -260,10 +276,9 @@ class AsyncTieredKVCache:
                 )
             time.sleep(self._SSD_WAIT_POLL)
 
-        print(f"  ⏳ [主執行緒] Block {block_id} 從 SSD 載入 RAM...")
+        print(f"  ⏳ [主執行緒/背景] Block {block_id} 從 SSD 載入...")
         tensors = mx.load(filepath)
         k_tensor, v_tensor = tensors["k"], tensors["v"]
-        self.put_block(block_id, k_tensor, v_tensor)
         return k_tensor, v_tensor
 
 

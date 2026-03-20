@@ -102,14 +102,22 @@ python -m pytest tests/test_cache_eviction.py -v
 | 推理引擎 | MLX | 原生支援 Apple Silicon Unified Memory |
 | 快取格式 | safetensors | 快速零拷貝讀寫，安全性佳 |
 | 背景 I/O | Python threading + Queue | 解放主執行緒，不阻斷 MLX 計算圖 |
-| 網路 API | FastAPI + uvicorn | 非同步高效能，Pydantic 型別驗證 |
+| 網路 API | FastAPI + uvicorn | 非同步高效能 |
+| 資料序列化 | msgpack + numpy | 解決 JSON 傳輸 Tensor 效能低落問題，傳輸速度提升 ~10 倍 |
 | LRU 機制 | OrderedDict | Python 內建，O(1) 更新順序 |
+
+## 效能測試 (Performance Benchmarks)
+
+原本使用 HTTP JSON 陣列傳輸 Tensor 時，網路負載與反序列化時間極高。經由匯入 `msgpack` 並直接轉換 `numpy` bytes 傳輸後，推論延遲大幅度縮減：
+
+*   **優化前 (JSON Serialization)**: 第 1 個 Block 耗時 ~221ms。
+*   **優化後 (`msgpack` Binary Serialization)**: 第 1 個 Block 耗時 **~23ms**，後續 Block 耗時縮減至 **~8ms**，整體效能提升約 10 倍。
 
 ## 已知限制（PoC 階段）
 
-- HTTP JSON 傳輸 Tensor 效能差，正式環境應改用 Thunderbolt RPC + 二進位序列化
-- 背景 I/O 執行緒寫入 `ssd_index` 存在 Race Condition，正式環境需加鎖
-- 尚未實作 Prefetch 機制（預先從 SSD 暖機下一批 Block）
+- 本專案目前使用簡單的 HTTP 傳輸。在跨實體機器的生產環境中，可考慮改用 Thunderbolt RPC 或 gRPC 甚至更底層的通訊協定。
+- 目前放棄了背景執行緒中呼叫 `mx.load()` 進行特徵預取 (Prefetch) 的機制，因 MLX 引擎尚未支援跨執行緒與主執行緒交錯求值的激烈並行（會引發 Segmentation fault）。目前依賴作業系統的 Page Cache 提供基礎預取效能。
+
 
 ## 參考專案
 

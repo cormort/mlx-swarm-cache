@@ -19,9 +19,12 @@ import os
 import time
 
 import mlx.core as mx
+
+# 新增 import
+import msgpack
+import numpy as np
 import uvicorn
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Request, Response
 
 from src.node.worker_core import ExoWorkerNode
 
@@ -46,22 +49,14 @@ worker = ExoWorkerNode(
 
 app = FastAPI(
     title="MLX-Swarm-Cache Worker",
-    description=f"Worker node [{NODE_ID}] handling layers {START_LAYER}-{END_LAYER - 1}",
+    description=(
+        f"Worker node [{NODE_ID}] handling layers "
+        f"{START_LAYER}-{END_LAYER - 1}"
+    ),
     version="0.1.0",
 )
 
-
-class ForwardRequest(BaseModel):
-    block_id: str
-    # Tensor 序列化為多維 List 以便 JSON 傳輸
-    hidden_states_list: list
-
-
-class ForwardResponse(BaseModel):
-    block_id: str
-    hidden_states_list: list
-    compute_time_ms: float
-
+# 移除 Pydantic 模型，改用 Request/Response 處理 raw bytes
 
 # ─────────────────────────────────────────────
 # 端點
@@ -77,36 +72,56 @@ async def health_check():
     }
 
 
-@app.post("/forward", response_model=ForwardResponse)
-async def forward_pass(req: ForwardRequest):
+@app.post("/forward")
+async def forward_pass(request: Request):
     """
-    接收上游特徵矩陣，執行本節點負責的層計算，回傳輸出特徵矩陣。
+    接收 msgpack 格式的特徵矩陣，執行本節點負責的層計算，回傳輸出 msgpack。
     """
     start_time = time.time()
-    print(f"\n[{NODE_ID}] 🌐 收到 API 請求，處理 Block: {req.block_id}")
-
+    
     try:
-        # 1. 反序列化：JSON List → MLX Tensor
-        hidden_states_tensor = mx.array(req.hidden_states_list)
+        raw_body = await request.body()
+        data = msgpack.unpackb(raw_body, raw=False)
+        block_id = data["block_id"]
+        
+        print(f"\n[{NODE_ID}] 🌐 收到 API 請求，處理 Block: {block_id}")
+
+        # 1. 反序列化：bytes -> numpy -> MLX Tensor
+        # msgpack 經常會把 bytes 轉成 bytes object, 我們透過 np.frombuffer 轉回數值陣列
+        shape = tuple(data["shape"])
+        dtype_str = data["dtype"]
+        np_dtype = np.dtype(dtype_str)
+        
+        np_array = np.frombuffer(
+            data["hidden_states_bytes"], dtype=np_dtype
+        ).reshape(shape)
+        hidden_states_tensor = mx.array(np_array)
 
         # 2. 執行推理（含自動 SSD KV Cache 管理）
-        output_tensor = worker.forward_pass(hidden_states_tensor, req.block_id)
+        output_tensor = worker.forward_pass(hidden_states_tensor, block_id)
 
-        # 3. 序列化：MLX Tensor → Python List
-        output_list = output_tensor.tolist()
+        # 3. 序列化：MLX Tensor -> numpy -> bytes
+        # 注意 MLX tensor 先轉 numpy 才能取得底層 bytes
+        out_np = np.array(output_tensor)
+        out_bytes = out_np.tobytes()
 
         compute_time_ms = (time.time() - start_time) * 1000
         print(f"[{NODE_ID}] ✅ 處理完成，耗時 {compute_time_ms:.2f} ms")
 
-        return ForwardResponse(
-            block_id=req.block_id,
-            hidden_states_list=output_list,
-            compute_time_ms=compute_time_ms,
-        )
+        response_data = {
+            "block_id": block_id,
+            "hidden_states_bytes": out_bytes,
+            "shape": out_np.shape,
+            "dtype": str(out_np.dtype),
+            "compute_time_ms": compute_time_ms,
+        }
+        
+        packed_response = msgpack.packb(response_data, use_bin_type=True)
+        return Response(content=packed_response, media_type="application/msgpack")
 
     except Exception as e:
         print(f"[{NODE_ID}] ❌ 處理失敗: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # ─────────────────────────────────────────────

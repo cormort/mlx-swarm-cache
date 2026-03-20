@@ -13,10 +13,11 @@ worker_core.py — ExoWorkerNode
   → try/except 包住初始化，失敗時呼叫 shutdown() 清理。
 """
 
-import mlx.core as mx
 import queue
 import threading
 import time
+
+import mlx.core as mx
 
 from src.cache.async_tiered_cache import AsyncTieredKVCache
 

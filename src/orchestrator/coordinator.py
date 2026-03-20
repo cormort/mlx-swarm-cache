@@ -26,6 +26,8 @@ import os
 import time
 
 import mlx.core as mx
+import msgpack
+import numpy as np
 import requests
 
 # ─────────────────────────────────────────────
@@ -58,24 +60,47 @@ def text_to_embeddings(prompt: str) -> mx.array:
     return mx.random.uniform(shape=(1, 16, 4096))
 
 
+
+
 def call_worker_node(
     url: str, block_id: str, hidden_states: mx.array
 ) -> tuple[mx.array | None, float]:
     """
-    將特徵矩陣序列化為 JSON 並 POST 至指定 Worker 節點。
+    將特徵矩陣序列化為 msgpack 並 POST 至指定 Worker 節點。
 
     Returns:
         (輸出特徵矩陣, 節點回報的計算耗時 ms)；失敗時回傳 (None, 0)。
     """
-    payload = {
+    hs_np = np.array(hidden_states)
+    payload_dict = {
         "block_id": block_id,
-        "hidden_states_list": hidden_states.tolist(),  # ⚠️ 效能瓶頸
+        "hidden_states_bytes": hs_np.tobytes(),
+        "shape": hs_np.shape,
+        "dtype": str(hs_np.dtype),
     }
+    
     try:
-        response = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
+        payload_bytes = msgpack.packb(payload_dict, use_bin_type=True)
+        headers = {"Content-Type": "application/msgpack"}
+        
+        response = requests.post(
+            url, data=payload_bytes, headers=headers, timeout=REQUEST_TIMEOUT
+        )
         response.raise_for_status()
-        data = response.json()
-        return mx.array(data["hidden_states_list"]), data["compute_time_ms"]
+        
+        data = msgpack.unpackb(response.content, raw=False)
+        
+        shape = tuple(data["shape"])
+        dtype_str = data["dtype"]
+        np_dtype = np.dtype(dtype_str)
+        
+        np_array = np.frombuffer(
+            data["hidden_states_bytes"], dtype=np_dtype
+        ).reshape(shape)
+        output_tensor = mx.array(np_array)
+        
+        return output_tensor, data["compute_time_ms"]
+        
     except requests.exceptions.Timeout:
         print(f"❌ 節點 {url} 請求逾時（>{REQUEST_TIMEOUT}s）")
         return None, 0.0
@@ -85,6 +110,10 @@ def call_worker_node(
     except requests.exceptions.RequestException as e:
         print(f"❌ 呼叫節點 {url} 失敗: {e}")
         return None, 0.0
+    except Exception as e:
+        print(f"❌ 解析節點 {url} 回傳資料失敗: {e}")
+        return None, 0.0
+
 
 
 def generate_step(
