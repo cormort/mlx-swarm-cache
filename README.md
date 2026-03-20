@@ -24,9 +24,21 @@ MLX-Swarm-Cache 是一個實驗性的分散式 LLM 推理引擎概念驗證 (PoC
 假設您有兩台設備 (例如 Mac mini M4 與 MacBook Air) 準備進行叢集運算：
 
 **1. 在節點 A (負責前半段網路層) 啟動 Worker:**
-```bash
+bash
 export NODE_ID="mac_mini_m4"
 export START_LAYER=0
 export END_LAYER=16
 export PORT=8000
 python -m src.node.api_server
+
+2. 在節點 B (負責後半段網路層) 啟動 Worker:
+Bash
+export NODE_ID="macbook_air"
+export START_LAYER=16
+export END_LAYER=32
+export PORT=8001
+python -m src.node.api_server
+
+3. 啟動指揮官 (Coordinator) 進行推理:
+Bash
+python -m src.orchestrator.coordinator
