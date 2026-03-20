@@ -99,12 +99,24 @@ class ExoWorkerNode:
         """
         執行本節點負責的所有層的前向傳播。
 
+        此函式接收從上一步（Coordinator 或前一個 Node）以 msgpack 形式
+        傳來的特徵矩陣，然後依序讓特徵通過本節點負責的所有神經網路層
+        (`self.assigned_layers`)。
+
+        在經過每一層時：
+        1. 模擬產生該層專屬的 K/V 狀態 (Key/Value states)。
+        2. 將 K/V 狀態交由 `AsyncTieredKVCache` 存入 RAM 
+           (滿載時自動於背景卸載到 SSD)。
+        3. 從快取中讀回歷史 context 以進行 Attention 計算 
+           (若已卸載，則同步從 SSD 載回)。
+        4. 最終呼叫 `mx.eval(x)` 確保所有延遲計算在本節點完成。
+
         Args:
-            hidden_states:    從上游節點（或 Coordinator）傳入的特徵矩陣。
-            current_block_id: 本次推理的 Block 識別碼（對應 KV Cache 索引鍵）。
+            hidden_states (mx.array): 從網路層接收到的 MLX 特徵矩陣。
+            current_block_id (str): 本次推理對應的 Cache 鍵值或 Block ID。
 
         Returns:
-            處理完畢的特徵矩陣，準備送往下一個節點。
+            mx.array: 經過所有分配層處理完畢的特徵矩陣，供下一階段使用。
         """
         print(
             f"\n[{self.node_id}] 📥 收到網路傳來的特徵，"

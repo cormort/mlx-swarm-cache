@@ -75,7 +75,19 @@ async def health_check():
 @app.post("/forward")
 async def forward_pass(request: Request):
     """
-    接收 msgpack 格式的特徵矩陣，執行本節點負責的層計算，回傳輸出 msgpack。
+    接收 msgpack 格式的特徵矩陣，執行本節點負責的層計算，最後回傳更新後的特徵矩陣。
+
+    這個端點作為分散式推論網路中單一節點的進入點：
+    1. 從 HTTP Body 提取二進位的 msgpack 資料。
+    2. 反序列化成 NumPy 陣列，並轉換為 `mlx.core.array` 張量。
+    3. 呼叫 `WorkerCore` 執行神經網路的前向傳播 (Forward Pass) 與 KV Cache 快取管理。
+    4. 將計算結果再次序列化為 bytes 並封裝為 msgpack 回傳給 Coordinator (上一棒)。
+
+    Args:
+        request (Request): FastAPI 的原始 Request 物件，包含二進位的 Payload。
+
+    Returns:
+        Response: 包裝著 msgpack 序列化資料的原始 HTTP Response。
     """
     start_time = time.time()
     

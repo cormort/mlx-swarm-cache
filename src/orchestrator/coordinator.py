@@ -66,10 +66,20 @@ def call_worker_node(
     url: str, block_id: str, hidden_states: mx.array
 ) -> tuple[mx.array | None, float]:
     """
-    將特徵矩陣序列化為 msgpack 並 POST 至指定 Worker 節點。
+    將特徵矩陣序列化為 msgpack 並 POST 至指定 Worker 節點進行推理。
+
+    此函式負責處理節點之間的網路通訊，使用 msgpack 二進位格式傳輸
+    以取代 Pydantic/JSON，大幅降低網路頻寬負載與反序列化時間。
+
+    Args:
+        url (str): 目標 Worker 節點的 HTTP API 網址 (例如: http://localhost:8000/forward)。
+        block_id (str): 當前處理的 Token Block 識別碼，用於追蹤工作進度或標註快取。
+        hidden_states (mx.array): 準備要傳輸給 Worker 的 MLX 隱藏層特徵矩陣。
 
     Returns:
-        (輸出特徵矩陣, 節點回報的計算耗時 ms)；失敗時回傳 (None, 0)。
+        tuple[mx.array | None, float]: 
+            - 成功時回傳 (計算完成的輸出特徵矩陣, 節點回報的計算耗時 ms)。
+            - 失敗或發生網路錯誤時回傳 (None, 0.0)。
     """
     hs_np = np.array(hidden_states)
     payload_dict = {
@@ -133,12 +143,15 @@ def generate_step(
         print(f"\n🏃 [第{i}棒] 傳送資料至 Node {i} ({url})...")
         states, t = call_worker_node(url, block_id, states)
         if states is None:
+            # 任一節點斷線即中斷推理，確保不會產生錯誤的 Token
             return None
         timings.append(t)
 
     total_time = (time.time() - step_start) * 1000
     timing_str = ", ".join(f"N{i+1}: {t:.2f} ms" for i, t in enumerate(timings))
     print(f"✨ {block_id} 推理完成！(總耗時: {total_time:.2f} ms | {timing_str})")
+    
+    # 最終輸出的隱藏層狀態
     return states
 
 

@@ -181,6 +181,22 @@ class AsyncTieredKVCache:
     # ── 公開 API ──────────────────────────────
 
     def put_block(self, block_id: str, k_tensor: mx.array, v_tensor: mx.array) -> None:
+        """
+        將 K/V 張量快取至 RAM (Hot Tier)，
+        並在滿載時自動於背景非同步卸載至 SSD (Cold Tier)。
+
+        為了確保 MLX 執行緒安全，核心的卸載邏輯實作了以下保護機制：
+        1. 獲取 Lock，從 RAM 移除 LRU (最近最少使用) 的 Block。
+        2. 將被挑選的 LRU Block 放回 `pending_ssd` 中，供讀取端追蹤狀態。
+        3. 釋放 Lock，然後在主執行緒中安全地呼叫 `mx.eval()` 具體化張量 
+           (避免推延求值造成崩潰)。
+        4. 最終將張量透過 `io_queue` 送入背景執行緒寫入磁碟 (safetensors 格式)。
+
+        Args:
+            block_id (str): 張量對應的唯一識別碼 (通常是層數加上步驟標記)。
+            k_tensor (mx.array): Key 張量
+            v_tensor (mx.array): Value 張量
+        """
         evict_task = None
         with self._lock:
             if block_id in self.ram_cache:
@@ -209,11 +225,20 @@ class AsyncTieredKVCache:
 
     def get_block(self, block_id: str):
         """
-        獲取 KV 區塊。
-        - RAM 命中         → 更新 LRU，立即返回
-        - pending_ssd 中   → 等待落盤後再載入（不回傳 None）
-        - ssd_index 中     → 從磁碟同步載回
-        - 找不到           → 返回 (None, None)
+        獲取 KV 區塊，提供自動的 SSD 分層讀回 (Reload) 機制。
+
+        根據區塊目前的存放位置，會有以下行為：
+        - RAM 命中 (Hot Tier)  → 更新 LRU 順位，直接回傳。
+        - pending_ssd 中       → 背景仍在落盤，鎖定並等待寫入完成後再載入。
+        - ssd_index 中         → 從磁碟同步載回 RAM 並更新 LRU。
+        - 完全找不到           → 返回 (None, None)。
+
+        Args:
+            block_id (str): 欲獲取的區塊識別碼。
+
+        Returns:
+            tuple[mx.array, mx.array] | tuple[None, None]: 回傳 (K, V)，
+            找不到則皆為 None。
         """
         with self._lock:
             if block_id in self.ram_cache:

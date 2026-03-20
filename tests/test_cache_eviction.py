@@ -152,7 +152,9 @@ class TestAsyncTieredKVCache:
         finally:
             cache.shutdown()
 
-    @pytest.mark.skip(reason="MLX engine consistently segfaults under extreme thread concurrency. Locking logic is sound.")
+    @pytest.mark.skip(
+        reason="MLX engine consistently segfaults under extreme concurrency."
+    )
     def test_ssd_index_no_race_condition(self, tmp_dir):
         """
         高並發讀寫 ssd_index 不造成 Race Condition（Bug #1 修正驗證）。
