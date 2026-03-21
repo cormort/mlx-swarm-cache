@@ -17,6 +17,7 @@ announcer.py — Worker 節點 mDNS 廣播器
   announcer.unregister()  # 優雅關閉：移除廣播
 """
 
+import os
 import socket
 
 from zeroconf import ServiceInfo, Zeroconf
@@ -63,7 +64,7 @@ class SwarmAnnouncer:
             type_=SERVICE_TYPE,
             name=f"{self.node_id}.{SERVICE_TYPE}",
             server=f"{self.node_id}.local.",
-            addresses=[socket.inet_aton(local_ip)],
+            parsed_addresses=[local_ip],  # 取代舊版的 inet_aton 與 addresses，安全支援 IPv4/v6
             port=self.port,
             properties={
                 "node_id": self.node_id,
@@ -80,31 +81,48 @@ class SwarmAnnouncer:
         )
 
     def unregister(self) -> None:
-        """從區域網路中移除 mDNS 服務，停止廣播。"""
+        """取消發佈 mDNS 廣播並釋放相關資源。
+
+        在 Worker 程式結束（Ctrl+C 或發生例外）時必須呼叫，
+        以確保 Coordinator 能夠及時發現節點離線。加入防呆保護
+        機制，防止註冊過程錯誤導致 unregister 異常崩潰。
+        """
         if self._zeroconf and self._info:
-            self._zeroconf.unregister_service(self._info)
-            self._zeroconf.close()
-            print(f"📡 [{self.node_id}] mDNS 廣播已關閉")
-            self._zeroconf = None
-            self._info = None
+            try:
+                self._zeroconf.unregister_service(self._info)
+            except Exception as e:
+                print(f"⚠️ mDNS 服務解除註冊發生錯誤: {e}")
+            finally:
+                self._zeroconf.close()
+                self._zeroconf = None
+                self._info = None
+                print(f"👋 已停止 mDNS 廣播 Node [{self.node_id}]")
 
     @staticmethod
     def _get_local_ip() -> str:
         """偵測本機的區域網路 IP 位址。
 
-        透過建立一個 UDP socket 並嘗試連線到外部位址（不實際傳送資料）
-        來取得作業系統優先選用的網卡 IP。在 Thunderbolt Bridge 連接的環境下，
-        macOS 會自動優先回傳 Thunderbolt 網卡的 IP。
+        為解決 Thunderbolt Bridge (169.254.x.x) 與 Wi-Fi 網路的路由衝突，
+        優先檢查作業系統環境變數 HOST_IP 是否有被手動指定。否則使用預設
+        UDP Socket 策略進行偵測。
 
         Returns:
-            本機 IP 位址字串（例如 "192.168.1.10" 或 "169.254.100.2"）。
+            本機對區網可見的有效 IP 字串。
         """
+        # 1. 優先讀取環境變數，解決 Thunderbolt 等特定網卡綁定需求
+        forced_ip = os.environ.get("HOST_IP")
+        if forced_ip:
+            return forced_ip
+
+        # 2. 自動偵測邏輯
         try:
+            # 建立一個 UDP socket 並連接到路由專用 IP
+            # (此 IP 不需要真的存在，用途是讓 OS 告訴我們它會用哪張網卡發送封包)
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            # 連線到一個不會實際傳送資料的外部位址
             sock.connect(("10.255.255.255", 1))
             ip = sock.getsockname()[0]
             sock.close()
             return ip
         except Exception:
+            # 如果無法偵測，則回傳本機迴路位址
             return "127.0.0.1"
