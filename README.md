@@ -32,8 +32,8 @@ An experimental distributed LLM inference engine for Apple Silicon, combining th
    └────────────┘       └────────────┘
 ```
 
-1. **Coordinator**: 接收使用者輸入，轉換特徵矩陣並排程。
-2. **Worker Nodes**: 每個節點是一個獨立的 FastAPI 服務，負責特定神經網路層。
+1. **Coordinator**: 接收使用者輸入，轉換特徵矩陣並排程。具備 **Auto-Discovery** 能力，能透過 mDNS 自動偵測區網中的 Worker。
+2. **Worker Nodes**: 每個節點是一個獨立的 FastAPI 服務，負責特定神經網路層，啟動時會自動在區網廣播自己的存在。
 3. **Async Tiered Cache**: 在背景將最近最少使用（LRU）的 Context 轉為 `safetensors` 存入磁碟，釋放 RAM 給當前的運算。
 
 ## 專案結構
@@ -46,13 +46,17 @@ mlx-swarm-cache/
 ├── src/
 │   ├── cache/
 │   │   └── async_tiered_cache.py   # 背景異步 SSD 快取機制
+│   ├── discovery/
+│   │   ├── announcer.py            # Worker mDNS 廣播器
+│   │   └── listener.py             # Coordinator mDNS 監聽器
 │   ├── node/
 │   │   ├── worker_core.py          # MLX 推理與快取管理
 │   │   └── api_server.py           # FastAPI 網路服務端點
 │   └── orchestrator/
 │       └── coordinator.py          # 指揮官：發送 Prompt 與網路排程
 └── tests/
-    └── test_cache_eviction.py      # 驗證 RAM 滿載時卸載行為
+    ├── test_cache_eviction.py      # 驗證 RAM 滿載時卸載行為
+    └── test_discovery.py           # 驗證 Auto-Discovery 行為
 ```
 
 ## 部署與執行說明 (Deployment Guide)
@@ -96,19 +100,30 @@ python -m src.node.api_server
 
 ### 3. 啟動指揮官 (Coordinator API Gateway)
 
-Coordinator 現已升級為一個 **OpenAI 相容的 FastAPI 伺服器**。它負責接收外部 `/v1/chat/completions` 請求，轉譯成特徵矩陣後統籌內部 Worker 網路的推論接力。
+Coordinator 現已升級為一個 **OpenAI 相容的 FastAPI 伺服器**，並具備 **Auto-Discovery (區域網路自動尋找)** 功能。
+它負責接收外部 `/v1/chat/completions` 請求，轉譯成特徵矩陣後統籌內部 Worker 網路的推論接力。
 
-啟動前，您可以透過 `NODE_URLS` 設定內部 Worker 的 IP，並利用 `API_KEY` 環境變數開啟簡單的身分驗證保護：
+#### 模式一：自動尋找節點（推薦）
+預設情況下（`DISCOVERY_MODE=auto`），Coordinator 啟動後會利用 mDNS (Zeroconf) 自動尋找區域網路內所有活著的 Worker，**完全不需要手動設定 IP**。您甚至可以隨時加入新的 Mac 來擴充算力！
 
 ```bash
-# 設定內部 Worker 節點清單 (單機不指定預設就是連 8000 和 8001)
-export NODE_URLS="http://localhost:8000/forward,http://localhost:8001/forward"
-
 # [選填] 設定外部呼叫的 API Key
 export API_KEY="sk-my-secret-key-123"
 
-# 預設監聽 0.0.0.0:8080
+# 預設監聽 0.0.0.0:8080，自動偵測 Worker
 export COORDINATOR_PORT=8080 
+python -m src.orchestrator.coordinator
+```
+
+查看目前已自動連結的節點：
+```bash
+curl http://localhost:8080/v1/nodes
+```
+
+#### 模式二：手動指定節點 (向後相容)
+```bash
+export DISCOVERY_MODE="manual"
+export NODE_URLS="http://192.168.1.10:8000/forward,http://192.168.1.11:8001/forward"
 python -m src.orchestrator.coordinator
 ```
 
@@ -130,10 +145,10 @@ curl -X POST "http://localhost:8080/v1/chat/completions" \
 
 ## 測試項目與結果 (Test Cases and Results)
 
-專案包含完整的自動化測試套件，確保快取系統面對滿載、並發等極端情況都能保持功能正常與穩定。可透過下方指令執行測試：
+專案包含完整的自動化測試套件，確保快取系統面對滿載、並發等極端情況都能保持功能正常與穩定，並驗證 Auto-Discovery 的可靠性。可透過下方指令執行測試：
 
 ```bash
-python -m pytest tests/test_cache_eviction.py -v
+python -m pytest tests/ -v
 ```
 
 ### 1. 同步快取測試 (`TieredKVCache`)
@@ -153,11 +168,14 @@ python -m pytest tests/test_cache_eviction.py -v
 - ✅ `test_path_traversal_blocked`: 確認異步版同樣具備防禦路徑穿越漏洞的安全控制。
 - ⏭️ `test_ssd_index_no_race_condition`: *(Skipped)* 在 20 Thread 極限並發打穿卸載頻寬的壓力測試下，已知 MLX C++ 底層引擎的 `eval/load` 目前無法承受跨執行緒的交錯綁定，會在引擎層級觸發 `Segmentation fault`。該測試已設為 Skip，不影響一般分散式架構下的正常推理。
 
-### 3. 指揮官調度測試 (`CoordinatorNodeUrls`)
-- ✅ `test_node_urls_parsed_from_env`: 確認 `NODE_URLS` 環境變數能正確轉換支援動態數量的 Worker 節點陣列。
-- ✅ `test_node_urls_strips_whitespace`: 確認網址擷取器具備基礎容錯，過濾不小心的空白殘留。
+### 3. 區域網路自動尋找測試 (`test_discovery.py`)
+- ✅ `test_register_and_unregister`: 廣播器能成功註冊與取消 mDNS 服務。
+- ✅ `test_listener_discovers_announcer`: 監聽器能自動偵測到新上線的節點廣播。
+- ✅ `test_nodes_sorted_by_start_layer`: 多個節點能依據 `start_layer` 正確排序。
+- ✅ `test_node_removal_on_unregister`: 節點取消廣播後，監聽器會自動將其從可用清單移除。
+- ✅ `test_manual_mode_uses_node_urls`: 手動模式能向後相容讀取 `NODE_URLS` 環境變數。
 
-> **最終執行結果**: `14 passed, 1 skipped in 0.10s` (核心邏輯全數通過)
+> **最終執行結果**: `23 passed, 1 skipped in 14.04s` (核心邏輯與連線機制全數通過)
 
 ## 設計決策
 

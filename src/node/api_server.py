@@ -141,5 +141,26 @@ async def forward_pass(request: Request):
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
+    import signal
+
+    from src.discovery.announcer import SwarmAnnouncer
+
+    announcer = SwarmAnnouncer(
+        node_id=NODE_ID,
+        port=PORT,
+        start_layer=START_LAYER,
+        end_layer=END_LAYER,
+    )
+
+    def _shutdown_handler(sig, frame):
+        """捕捉 SIGINT/SIGTERM，優雅關閉 mDNS 廣播。"""
+        print(f"\n🛑 [{NODE_ID}] 收到關閉訊號，正在移除 mDNS 廣播...")
+        announcer.unregister()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGINT, _shutdown_handler)
+    signal.signal(signal.SIGTERM, _shutdown_handler)
+
     print(f"🟢 啟動 Worker 節點 [{NODE_ID}]，監聽 port {PORT}")
+    announcer.register()
     uvicorn.run(app, host="0.0.0.0", port=PORT)

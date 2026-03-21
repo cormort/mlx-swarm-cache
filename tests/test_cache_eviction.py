@@ -235,8 +235,8 @@ class TestCoordinatorNodeUrls:
 
         importlib.reload(coord)
 
-        assert len(coord.NODE_URLS) == 3
-        assert coord.NODE_URLS[2] == "http://192.168.1.101:8002/forward"
+        assert len(coord._MANUAL_NODE_URLS) == 3
+        assert coord._MANUAL_NODE_URLS[2] == "http://192.168.1.101:8002/forward"
 
     def test_node_urls_strips_whitespace(self, monkeypatch):
         """URL 之間的空白應被自動去除。"""
@@ -250,4 +250,4 @@ class TestCoordinatorNodeUrls:
 
         importlib.reload(coord)
 
-        assert all(" " not in url for url in coord.NODE_URLS)
+        assert all(" " not in url for url in coord._MANUAL_NODE_URLS)

@@ -6,20 +6,21 @@ coordinator.py — 叢集指揮官
   2. 依序呼叫各 Worker 節點的 /forward API，完成接力推理
   3. 收集每個 Block 的最終輸出（實務上會接 LM Head 轉為文字 Token）
 
-修正紀錄 v2
+修正紀錄 v3
 -----------
-- [Bug #3] 節點清單硬編碼兩個，新增第三台機器需要改程式碼
-  → NODE_URLS 從環境變數讀取逗號分隔的 URL 清單，
-    generate_step() 用 loop 依序呼叫，節點數量不再受限。
+- [Bug #3] NODE_URLS 環境變數化，支援不限數量的節點。
+- [Feature] Auto-Discovery：使用 mDNS/Zeroconf 自動偵測 Worker 節點，
+  不再需要手動設定 NODE_URLS。透過 DISCOVERY_MODE 環境變數控制：
+    - "auto"：（預設）自動偵測區域網路中的 Worker 節點
+    - "manual"：使用 NODE_URLS 環境變數手動指定
 
 使用方式：
+    # 自動模式（預設，不需設定 NODE_URLS）
     python -m src.orchestrator.coordinator
 
-兩個節點（預設）：
-    NODE_URLS=http://localhost:8000/forward,http://192.168.1.100:8001/forward
-
-三個節點（或更多）：
-    NODE_URLS=http://localhost:8000/forward,http://192.168.1.100:8001/forward,http://192.168.1.101:8002/forward
+    # 手動模式
+    DISCOVERY_MODE=manual NODE_URLS=http://localhost:8000/forward,http://localhost:8001/forward \
+      python -m src.orchestrator.coordinator
 """
 
 import os
@@ -34,16 +35,38 @@ import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
+from src.discovery.listener import SwarmListener
+
 # ─────────────────────────────────────────────
-# 叢集節點設定（Bug #3 修正）
+# 叢集節點設定（支援 Auto-Discovery 與手動模式）
 # ─────────────────────────────────────────────
 
-_default_urls = "http://localhost:8000/forward,http://192.168.1.100:8001/forward"
-NODE_URLS: list[str] = [
+DISCOVERY_MODE = os.getenv("DISCOVERY_MODE", "auto").strip().lower()
+
+# 手動模式：從環境變數讀取 NODE_URLS
+_default_urls = "http://localhost:8000/forward,http://localhost:8001/forward"
+_MANUAL_NODE_URLS: list[str] = [
     u.strip() for u in os.getenv("NODE_URLS", _default_urls).split(",") if u.strip()
 ]
 
+# 自動模式：建立 mDNS 監聽器（在 __main__ 中啟動）
+_listener: SwarmListener | None = None
+
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", 120))
+
+
+def get_active_node_urls() -> list[str]:
+    """依當前模式取得排序過的 Worker 節點 URL 清單。
+
+    - auto 模式：從 SwarmListener 動態取得（依 start_layer 排序）
+    - manual 模式：回傳環境變數 NODE_URLS 的靜態清單
+
+    Returns:
+        現有可用節點的 Forward URL 清單。
+    """
+    if DISCOVERY_MODE == "auto" and _listener is not None:
+        return _listener.get_node_urls()
+    return _MANUAL_NODE_URLS
 
 
 # ─────────────────────────────────────────────
@@ -128,16 +151,25 @@ def call_worker_node(
 
 def generate_step(block_id: str, current_hidden_states: mx.array) -> mx.array | None:
     """
-    執行一次完整的前向傳播，依序穿越 NODE_URLS 中所有節點（Bug #3 修正）。
+    執行一次完整的前向傳播，依序穿越所有已發現的節點。
+
+    在 Auto-Discovery 模式下，每次呼叫都會從 SwarmListener
+    動態取得最新的節點清單，確保新上線的節點能即時加入推理。
 
     Returns:
         最終輸出特徵矩陣；任一節點失敗則回傳 None。
     """
+    node_urls = get_active_node_urls()
+
+    if not node_urls:
+        print("❌ 沒有可用的 Worker 節點！請確認節點已啟動。")
+        return None
+
     step_start = time.time()
     states = current_hidden_states
     timings: list[float] = []
 
-    for i, url in enumerate(NODE_URLS, start=1):
+    for i, url in enumerate(node_urls, start=1):
         print(f"\n🏃 [第{i}棒] 傳送資料至 Node {i} ({url})...")
         states, t = call_worker_node(url, block_id, states)
         if states is None:
@@ -163,6 +195,23 @@ app = FastAPI(
     title="MLX-Swarm-Cache Coordinator API",
     description="OpenAI-compatible API Gateway for the MLX distributed inference swarm.",
 )
+
+
+@app.get("/v1/nodes")
+async def list_nodes():
+    """查看叢集中的節點狀態（支援 Auto-Discovery 與 Manual 模式）。"""
+    if DISCOVERY_MODE == "auto" and _listener is not None:
+        nodes = _listener.get_nodes_info()
+        return {
+            "mode": "auto",
+            "node_count": len(nodes),
+            "nodes": nodes,
+        }
+    return {
+        "mode": "manual",
+        "node_count": len(_MANUAL_NODE_URLS),
+        "nodes": [{"forward_url": url} for url in _MANUAL_NODE_URLS],
+    }
 
 
 class ChatMessage(BaseModel):
@@ -241,9 +290,10 @@ async def chat_completions(req: ChatCompletionRequest):
         generated_blocks += 1
 
     # 實務上這裡會將 current_states 通過 LM Head 轉換為文字，目前以模擬字串代替
+    active_urls = get_active_node_urls()
     mock_reply = (
         f"這是 MLX-Swarm-Cache 產生的測試回應。\n"
-        f"成功穿越了 {len(NODE_URLS)} 個節點，經過 {generated_blocks} 輪推論接力完成！"
+        f"成功穿越了 {len(active_urls)} 個節點，經過 {generated_blocks} 輪推論接力完成！"
     )
 
     return ChatCompletionResponse(
@@ -266,10 +316,32 @@ async def chat_completions(req: ChatCompletionRequest):
 
 
 if __name__ == "__main__":
+    import signal
+
     port = int(os.getenv("COORDINATOR_PORT", 8080))
     print("=" * 50)
     print(f"🚀 MLX-Swarm-Cache 指揮官 API Gateway 已啟動 (Port {port})")
-    for i, url in enumerate(NODE_URLS, start=1):
-        print(f"   Node {i}: {url}")
+
+    if DISCOVERY_MODE == "auto":
+        _listener = SwarmListener()
+        _listener.start()
+        print("   模式: 🔍 Auto-Discovery (mDNS/Zeroconf)")
+        print("   等待 Worker 節點自動上線...")
+    else:
+        print("   模式: 📋 Manual (NODE_URLS)")
+        for i, url in enumerate(_MANUAL_NODE_URLS, start=1):
+            print(f"   Node {i}: {url}")
+
     print("=" * 50)
+
+    def _shutdown_handler(sig, frame):
+        """捕捉關閉訊號，優雅清理 mDNS 監聽器。"""
+        print("\n🛑 Coordinator 正在關閉...")
+        if _listener is not None:
+            _listener.stop()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGINT, _shutdown_handler)
+    signal.signal(signal.SIGTERM, _shutdown_handler)
+
     uvicorn.run(app, host="0.0.0.0", port=port)
