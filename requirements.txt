@@ -1,7 +1,9 @@
-mlx>=0.16.0
+mlx>=0.10.0
 fastapi>=0.110.0
 uvicorn>=0.29.0
 pydantic>=2.6.0
 requests>=2.31.0
-msgpack>=1.0.0
+msgpack>=1.0.5
 zeroconf>=0.131.0
+huggingface_hub>=0.20.0
+aiofiles>=23.2.1

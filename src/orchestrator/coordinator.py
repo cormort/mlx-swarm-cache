@@ -23,9 +23,11 @@ coordinator.py — 叢集指揮官
       python -m src.orchestrator.coordinator
 """
 
+import asyncio
 import os
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 import mlx.core as mx
@@ -34,6 +36,8 @@ import numpy as np
 import requests
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.staticfiles import StaticFiles
+from huggingface_hub import snapshot_download
 from pydantic import BaseModel
 
 from src.discovery.listener import SwarmListener
@@ -71,6 +75,10 @@ def get_active_node_urls() -> list[str]:
     if DISCOVERY_MODE == "auto" and _listener is not None:
         return _listener.get_node_urls()
     return _MANUAL_NODE_URLS
+
+
+# 模型下載用的共用執行緒池
+_download_executor = ThreadPoolExecutor(max_workers=2)
 
 
 # ─────────────────────────────────────────────
@@ -249,6 +257,52 @@ async def list_nodes():
     }
 
 
+# ─────────────────────────────────────────────
+# 模型管理 API (/v1/models)
+# ─────────────────────────────────────────────
+
+MODELS_DIR = os.getenv("MODELS_DIR", "./models")
+
+class DownloadRequest(BaseModel):
+    repo_id: str
+
+@app.get("/v1/models")
+async def list_models():
+    """掃描本機下載儲存資料夾，列出已下載的 Hugging Face 模型清單。"""
+    if not os.path.exists(MODELS_DIR):
+        return {"models": []}
+    
+    models = []
+    # 簡單邏輯：遞迴掃描資料夾，包含 config.json 的即視為一個有效的模型資料夾
+    for root, dirs, files in os.walk(MODELS_DIR):
+        if "config.json" in files:
+            rel_path = os.path.relpath(root, MODELS_DIR)
+            models.append({"repo_id": rel_path, "local_path": root})
+            
+    return {"models": models}
+
+@app.post("/v1/models/download")
+async def download_model(req: DownloadRequest):
+    """
+    接收像是 mlx-community/Llama-3.2-1B-Instruct-4bit 這樣的 repo_id，
+    透過 huggingface_hub 啟動背景下載。
+    """
+    repo_id = req.repo_id
+    local_dir = os.path.join(MODELS_DIR, repo_id)
+    
+    def _do_download():
+        print(f"📥 開始從 HuggingFace 下載模型: {repo_id} -> {local_dir}")
+        try:
+            snapshot_download(repo_id, local_dir=local_dir)
+            print(f"✅ 模型 {repo_id} 下載完成")
+        except Exception as e:
+            print(f"❌ 模型 {repo_id} 下載失敗: {e}")
+            
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(_download_executor, _do_download)
+    return {"status": "downloading", "repo_id": repo_id, "local_dir": local_dir}
+
+
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -348,6 +402,10 @@ async def chat_completions(req: ChatCompletionRequest):
             total_tokens=len(prompt) + generated_blocks,
         ),
     )
+
+# 掛載網頁管理前端 (必須在所有 API 靜態路由宣告之後)
+if os.path.exists("src/web"):
+    app.mount("/", StaticFiles(directory="src/web", html=True), name="web")
 
 
 if __name__ == "__main__":

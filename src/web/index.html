@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-TW" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MLX Swarm Cache Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #0f172a; color: #f8fafc; }
+        .glass-panel { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 1rem; }
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; background-color: #10b981; box-shadow: 0 0 10px #10b981; }
+        .blinking { animation: pulse 2s infinite; }
+        @keyframes pulse {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 8px rgba(16, 185, 129, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+        }
+    </style>
+</head>
+<body class="min-h-screen p-6 antialiased selection:bg-indigo-500 selection:text-white" x-data="app()">
+    <div class="max-w-7xl mx-auto space-y-6">
+        
+        <!-- Header -->
+        <header class="flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-xl font-bold">M</div>
+                <div>
+                    <h1 class="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-slate-400">MLX Swarm Cache</h1>
+                    <p class="text-sm text-slate-400">Distributed Inference Engine</p>
+                </div>
+            </div>
+            <div class="flex items-center space-x-2 bg-slate-800 px-4 py-2 rounded-full border border-slate-700">
+                <span class="status-dot blinking"></span>
+                <span class="text-sm font-medium" x-text="`Cluster Active (${nodeCount} Nodes)`"></span>
+            </div>
+        </header>
+
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            
+            <!-- Left Column: Cluster & Models -->
+            <div class="lg:col-span-5 space-y-6">
+                
+                <!-- Nodes Panel -->
+                <section class="glass-panel p-6 shadow-xl">
+                    <h2 class="text-lg font-semibold mb-4 flex items-center"><svg class="w-5 h-5 mr-2 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"></path></svg> Active Worker Nodes</h2>
+                    <div class="space-y-3">
+                        <template x-if="nodes.length === 0">
+                            <div class="text-slate-400 text-sm text-center py-4">Waiting for nodes to join...</div>
+                        </template>
+                        <template x-for="node in nodes" :key="node.forward_url">
+                            <div class="bg-slate-800/50 p-4 rounded-lg border border-slate-700 hover:border-indigo-500/50 transition-colors">
+                                <div class="flex justify-between items-start mb-2">
+                                    <div class="font-medium text-white" x-text="node.node_id || 'Manual Node'"></div>
+                                    <span class="text-xs bg-indigo-500/20 text-indigo-300 px-2 py-1 rounded-full border border-indigo-500/30" x-text="node.layers ? `Layers ${node.layers}` : 'Unknown Layers'"></span>
+                                </div>
+                                <div class="text-xs text-slate-400 font-mono truncate" x-text="node.forward_url"></div>
+                            </div>
+                        </template>
+                    </div>
+                </section>
+
+                <!-- Model Manager Panel -->
+                <section class="glass-panel p-6 shadow-xl">
+                    <h2 class="text-lg font-semibold mb-4 flex items-center"><svg class="w-5 h-5 mr-2 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg> Model Manager</h2>
+                    
+                    <!-- Download Form -->
+                    <form @submit.prevent="downloadModel" class="mb-6">
+                        <label class="block text-sm font-medium text-slate-300 mb-2">Download from Hugging Face</label>
+                        <div class="flex space-x-2">
+                            <input x-model="downloadRepo" type="text" placeholder="e.g. mlx-community/Llama-3.2-1B-Instruct-4bit" class="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 placeholder-slate-500 text-white" required>
+                            <button type="submit" :disabled="isDownloading" class="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center">
+                                <span x-show="!isDownloading">Download</span>
+                                <span x-show="isDownloading" class="flex items-center"><svg class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Fetching...</span>
+                            </button>
+                        </div>
+                        <div x-show="downloadStatus" class="mt-2 text-xs text-indigo-400" x-text="downloadStatus"></div>
+                    </form>
+
+                    <!-- Local Models List -->
+                    <div>
+                        <h3 class="text-sm font-medium text-slate-300 mb-3">Local Models</h3>
+                        <div class="space-y-2 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
+                            <template x-if="localModels.length === 0">
+                                <div class="text-slate-500 text-xs italic">No downloaded models found.</div>
+                            </template>
+                            <template x-for="model in localModels" :key="model.repo_id">
+                                <div class="flex items-center justify-between bg-slate-800/50 p-3 rounded-lg border border-slate-700">
+                                    <div class="flex flex-col">
+                                        <span class="text-sm font-medium text-slate-200" x-text="model.repo_id.split('/').pop()"></span>
+                                        <span class="text-xs text-slate-500" x-text="model.repo_id"></span>
+                                    </div>
+                                    <button class="text-xs bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded transition-colors">Select</button>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Right Column: Chat Interface -->
+            <div class="lg:col-span-7 h-[calc(100vh-8rem)]">
+                <section class="glass-panel w-full h-full shadow-2xl flex flex-col overflow-hidden border-t border-slate-700/50">
+                    <!-- Chat Header -->
+                    <div class="px-6 py-4 border-b border-slate-700/50 bg-slate-800/30 flex justify-between items-center backdrop-blur-md">
+                        <div class="flex items-center">
+                            <div class="w-8 h-8 rounded bg-gradient-to-tr from-emerald-400 to-cyan-500 flex items-center justify-center mr-3 scale-[0.8]"><svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path></svg></div>
+                            <h2 class="font-semibold text-slate-100 tracking-wide">Inference Playground</h2>
+                        </div>
+                        <div class="text-xs text-slate-400 bg-slate-900/50 px-3 py-1 rounded border border-slate-700">Using: swarm-cache</div>
+                    </div>
+
+                    <!-- Chat History -->
+                    <div class="flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth custom-scrollbar" id="chat-container">
+                        <template x-for="(msg, i) in chatHistory" :key="i">
+                            <div class="flex flex-col max-w-[85%]" :class="msg.role === 'user' ? 'ml-auto items-end' : 'mr-auto items-start'">
+                                <div class="text-xs text-slate-400 mb-1 px-1" x-text="msg.role === 'user' ? 'You' : 'Assistant'"></div>
+                                <div class="p-4 rounded-2xl shadow-sm text-[15px] leading-relaxed break-words"
+                                     :class="msg.role === 'user' ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-slate-800 border border-slate-700 text-slate-200 rounded-bl-none prose prose-invert prose-p:my-1 prose-pre:bg-slate-900 prose-pre:border prose-pre:border-slate-700'"
+                                     x-html="msg.role === 'user' ? escapeHtml(msg.content) : parseMarkdown(msg.content)">
+                                </div>
+                            </div>
+                        </template>
+                        
+                        <!-- Thinking Indicator -->
+                        <div x-show="isInferencing" class="flex flex-col max-w-[80%] mr-auto items-start">
+                            <div class="text-xs text-slate-400 mb-1 px-1">Assistant is reasoning...</div>
+                            <div class="p-4 rounded-2xl bg-slate-800 border border-slate-700 rounded-bl-none flex space-x-2 items-center h-12">
+                                <div class="w-2 h-2 rounded-full bg-slate-400 animate-bounce" style="animation-delay: 0ms"></div>
+                                <div class="w-2 h-2 rounded-full bg-slate-400 animate-bounce" style="animation-delay: 150ms"></div>
+                                <div class="w-2 h-2 rounded-full bg-slate-400 animate-bounce" style="animation-delay: 300ms"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Chat Input form -->
+                    <div class="p-4 bg-slate-800/50 border-t border-slate-700/50">
+                        <form @submit.prevent="sendMessage" class="relative">
+                            <input x-model="chatInput" type="text" placeholder="Type a message to the swarm..." 
+                                class="w-full bg-slate-900 border border-slate-700 rounded-xl pl-4 pr-12 py-4 text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 shadow-inner"
+                                :disabled="isInferencing">
+                            <button type="submit" :disabled="isInferencing || !chatInput.trim()" 
+                                class="absolute right-2 top-2 bottom-2 aspect-square bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded-lg flex items-center justify-center transition-colors">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
+                            </button>
+                        </form>
+                    </div>
+                </section>
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom Scrollbar Styles -->
+    <style>
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background-color: rgba(71, 85, 105, 0.5); border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background-color: rgba(71, 85, 105, 0.8); }
+    </style>
+
+    <script>
+        function app() {
+            return {
+                nodes: [],
+                nodeCount: 0,
+                localModels: [],
+                downloadRepo: '',
+                isDownloading: false,
+                downloadStatus: '',
+                
+                chatHistory: [
+                    { role: 'assistant', content: 'Hello! I am ready to process tasks across the MLX Swarm. Connect some worker nodes and let\'s begin.' }
+                ],
+                chatInput: '',
+                isInferencing: false,
+
+                init() {
+                    this.fetchNodes();
+                    this.fetchModels();
+                    setInterval(() => this.fetchNodes(), 3000);
+                },
+
+                async fetchNodes() {
+                    try {
+                        const res = await fetch('/v1/nodes');
+                        const data = await res.json();
+                        this.nodes = data.nodes || [];
+                        this.nodeCount = data.node_count || 0;
+                    } catch (e) {
+                        console.error("Failed to fetch node status");
+                    }
+                },
+
+                async fetchModels() {
+                    try {
+                        const res = await fetch('/v1/models');
+                        const data = await res.json();
+                        this.localModels = data.models || [];
+                    } catch (e) {
+                        console.error("Failed to fetch models");
+                    }
+                },
+
+                async downloadModel() {
+                    if (!this.downloadRepo.trim()) return;
+                    this.isDownloading = true;
+                    this.downloadStatus = 'Initiating download (check terminal for logs)...';
+                    try {
+                        const res = await fetch('/v1/models/download', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ repo_id: this.downloadRepo.trim() })
+                        });
+                        const data = await res.json();
+                        this.downloadStatus = data.detail || `Download tracking started for ${data.repo_id}...`;
+                        
+                        // Optimistically refresh models after a delay
+                        setTimeout(() => this.fetchModels(), 5000);
+                    } catch (e) {
+                        this.downloadStatus = 'Failed to request download.';
+                    } finally {
+                        setTimeout(() => { 
+                            this.isDownloading = false; 
+                            this.downloadStatus = '';
+                            this.downloadRepo = '';
+                        }, 5000);
+                    }
+                },
+
+                async sendMessage() {
+                    if (!this.chatInput.trim() || this.isInferencing) return;
+                    
+                    const userText = this.chatInput.trim();
+                    this.chatHistory.push({ role: 'user', content: userText });
+                    this.chatInput = '';
+                    this.isInferencing = true;
+                    this.scrollToBottom();
+
+                    try {
+                        // Prepare OpenAI-compatible API payload
+                        const payload = {
+                            model: "mlx-swarm-cache",
+                            messages: this.chatHistory.map(m => ({ role: m.role, content: m.content })),
+                            max_tokens: 30
+                        };
+
+                        const res = await fetch('/v1/chat/completions', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                        });
+
+                        if (!res.ok) throw new Error("API Error");
+                        
+                        const data = await res.json();
+                        const reply = data.choices[0].message.content;
+                        
+                        this.chatHistory.push({ role: 'assistant', content: reply });
+                    } catch (e) {
+                        this.chatHistory.push({ role: 'assistant', content: '❌ **Error:** Failed to reach cluster or inference was interrupted.' });
+                    } finally {
+                        this.isInferencing = false;
+                        this.scrollToBottom();
+                    }
+                },
+
+                escapeHtml(unsafe) {
+                    return unsafe
+                         .replace(/&/g, "&amp;")
+                         .replace(/</g, "&lt;")
+                         .replace(/>/g, "&gt;")
+                         .replace(/"/g, "&quot;")
+                         .replace(/'/g, "&#039;");
+                },
+                
+                parseMarkdown(text) {
+                    return marked.parse(text);
+                },
+
+                scrollToBottom() {
+                    setTimeout(() => {
+                        const container = document.getElementById('chat-container');
+                        if (container) container.scrollTop = container.scrollHeight;
+                    }, 50);
+                }
+            }
+        }
+    </script>
+</body>
+</html>
