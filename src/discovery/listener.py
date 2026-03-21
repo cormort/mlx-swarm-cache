@@ -98,9 +98,10 @@ class SwarmListener(ServiceListener):
             self._decode_property(info.properties, "end_layer", "0")
         )
 
-        # 解析 IP 位址
-        if info.addresses:
-            host = socket.inet_ntoa(info.addresses[0])
+        # 解析 IP 位址 (安全寫法：支援 IPv4 與 IPv6)
+        parsed_ips = info.parsed_addresses()
+        if parsed_ips:
+            host = parsed_ips[0]
         else:
             host = info.server.rstrip(".")
 
@@ -161,6 +162,24 @@ class SwarmListener(ServiceListener):
             )
             return [n.to_dict() for n in sorted_nodes]
 
+    def remove_node_by_url(self, url: str) -> None:
+        """將指定 URL 的殭屍節點強制從清單中剔除。
+
+        Args:
+            url: Worker 的 Forward URL（例如 http://192.168.1.10:8000/forward）
+        """
+        with self._lock:
+            # 找到符合該 URL 的節點 key 並刪除
+            target_key: str | None = None
+            for key, node in self._nodes.items():
+                if node.forward_url == url:
+                    target_key = key
+                    break
+
+            if target_key:
+                node = self._nodes.pop(target_key)
+                print(f"🗑️ 強制剔除殭屍節點: [{node.node_id}] ({url})")
+
     @property
     def node_count(self) -> int:
         """目前已偵測到的節點數量。"""
@@ -191,13 +210,8 @@ class SwarmListener(ServiceListener):
         if not properties:
             return default
 
-        # properties 的 key 可能是 bytes 或 str，統一用兩種方式嘗試
-        raw_value: bytes | str | None = None
-        key_bytes = key.encode()
-        if key_bytes in properties:
-            raw_value = properties[key_bytes]
-        elif key in properties:  # type: ignore[operator]
-            raw_value = properties[key]  # type: ignore[index]
+        key_bytes = key.encode("utf-8")
+        raw_value = properties.get(key_bytes)
 
         if raw_value is None:
             return default

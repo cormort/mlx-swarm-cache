@@ -173,6 +173,9 @@ def generate_step(block_id: str, current_hidden_states: mx.array) -> mx.array | 
         print(f"\n🏃 [第{i}棒] 傳送資料至 Node {i} ({url})...")
         states, t = call_worker_node(url, block_id, states)
         if states is None:
+            # 發生連線錯誤或 Timeout，如果是 Auto 模式則強制剔除殭屍節點
+            if DISCOVERY_MODE == "auto" and _listener is not None:
+                _listener.remove_node_by_url(url)
             # 任一節點斷線即中斷推理，確保不會產生錯誤的 Token
             return None
         timings.append(t)
