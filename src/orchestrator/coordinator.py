@@ -26,6 +26,7 @@ coordinator.py — 叢集指揮官
 import os
 import time
 import uuid
+from contextlib import asynccontextmanager
 
 import mlx.core as mx
 import msgpack
@@ -49,8 +50,11 @@ _MANUAL_NODE_URLS: list[str] = [
     u.strip() for u in os.getenv("NODE_URLS", _default_urls).split(",") if u.strip()
 ]
 
-# 自動模式：建立 mDNS 監聽器（在 __main__ 中啟動）
+# 自動模式：建立 mDNS 監聽器
 _listener: SwarmListener | None = None
+
+if DISCOVERY_MODE == "auto":
+    _listener = SwarmListener()
 
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", 120))
 
@@ -189,6 +193,33 @@ def generate_step(block_id: str, current_hidden_states: mx.array) -> mx.array | 
 
 
 # ─────────────────────────────────────────────
+# 生命週期管理 (Lifespan)
+# ─────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    port = int(os.getenv("COORDINATOR_PORT", 8080))
+    print("=" * 50)
+    print(f"🚀 MLX-Swarm-Cache 指揮官 API Gateway 已啟動 (Port {port})")
+
+    if DISCOVERY_MODE == "auto" and _listener is not None:
+        print("   模式: 🔍 Auto-Discovery (mDNS/Zeroconf)")
+        _listener.start()
+        print("   等待 Worker 節點自動上線...")
+    else:
+        print("   模式: 📋 Manual (NODE_URLS)")
+        for i, url in enumerate(_MANUAL_NODE_URLS, start=1):
+            print(f"   Node {i}: {url}")
+    print("=" * 50)
+
+    yield  # 交出控制權給 FastAPI 執行期間
+
+    print("\n🛑 Coordinator 正在關閉...")
+    if _listener is not None:
+        _listener.stop()
+
+
+# ─────────────────────────────────────────────
 # FastAPI OpenAI 相容 API 介面
 # ─────────────────────────────────────────────
 
@@ -197,6 +228,7 @@ API_KEY = os.getenv("API_KEY", "")
 app = FastAPI(
     title="MLX-Swarm-Cache Coordinator API",
     description="OpenAI-compatible API Gateway for the MLX distributed inference swarm.",
+    lifespan=lifespan,
 )
 
 
@@ -319,32 +351,6 @@ async def chat_completions(req: ChatCompletionRequest):
 
 
 if __name__ == "__main__":
-    import signal
-
     port = int(os.getenv("COORDINATOR_PORT", 8080))
-    print("=" * 50)
-    print(f"🚀 MLX-Swarm-Cache 指揮官 API Gateway 已啟動 (Port {port})")
-
-    if DISCOVERY_MODE == "auto":
-        _listener = SwarmListener()
-        _listener.start()
-        print("   模式: 🔍 Auto-Discovery (mDNS/Zeroconf)")
-        print("   等待 Worker 節點自動上線...")
-    else:
-        print("   模式: 📋 Manual (NODE_URLS)")
-        for i, url in enumerate(_MANUAL_NODE_URLS, start=1):
-            print(f"   Node {i}: {url}")
-
-    print("=" * 50)
-
-    def _shutdown_handler(sig, frame):
-        """捕捉關閉訊號，優雅清理 mDNS 監聽器。"""
-        print("\n🛑 Coordinator 正在關閉...")
-        if _listener is not None:
-            _listener.stop()
-        raise SystemExit(0)
-
-    signal.signal(signal.SIGINT, _shutdown_handler)
-    signal.signal(signal.SIGTERM, _shutdown_handler)
-
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # 透過字串匯入可讓 uvicorn 平滑處理 worker 行程
+    uvicorn.run("src.orchestrator.coordinator:app", host="0.0.0.0", port=port)

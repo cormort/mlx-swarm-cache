@@ -178,7 +178,7 @@ class SwarmListener(ServiceListener):
 
             if target_key:
                 node = self._nodes.pop(target_key)
-                print(f"🗑️ 強制剔除殭屍節點: [{node.node_id}] ({url})")
+                print(f"👻 偵測到殭屍節點，已強制剔除: [{node.node_id}]")
 
     @property
     def node_count(self) -> int:
