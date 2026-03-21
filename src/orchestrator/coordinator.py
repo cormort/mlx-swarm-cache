@@ -307,7 +307,6 @@ async def search_models(q: str = "", limit: int = 20):
         models = api.list_models(
             search=search_query,
             sort="downloads",
-            direction=-1,
             limit=limit,
         )
         results = []
