@@ -286,6 +286,44 @@ async def list_models():
             
     return {"models": models}
 
+
+@app.get("/v1/models/search")
+async def search_models(q: str = "", limit: int = 20):
+    """搜尋 HuggingFace Hub 上的 MLX 量化模型。
+
+    透過 HuggingFace API 搜尋 mlx-community 等組織發布的量化模型，
+    回傳模型名稱、下載次數與大小等資訊，方便使用者在 Web UI 上直接瀏覽與下載。
+
+    Args:
+        q: 搜尋關鍵字（例如 "llama", "qwen"）。留空則列出熱門模型。
+        limit: 回傳筆數上限（預設 20）。
+    """
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+    try:
+        # 搜尋 MLX 格式的模型（通常由 mlx-community 發布）
+        search_query = f"mlx {q}" if q else "mlx"
+        models = api.list_models(
+            search=search_query,
+            sort="downloads",
+            direction=-1,
+            limit=limit,
+        )
+        results = []
+        for m in models:
+            results.append({
+                "repo_id": m.id,
+                "downloads": m.downloads,
+                "likes": m.likes,
+                "last_modified": str(m.last_modified) if m.last_modified else None,
+            })
+        return {"models": results, "query": q}
+    except Exception as e:
+        logger.error("❌ 搜尋 HuggingFace 模型失敗: %s", e)
+        return {"models": [], "query": q, "error": str(e)}
+
+
 @app.post("/v1/models/download")
 async def download_model(req: DownloadRequest):
     """
