@@ -215,7 +215,9 @@ async def lifespan(app: FastAPI):
     if DISCOVERY_MODE == "auto":
         _listener = SwarmListener()
         logger.info("   模式: 🔍 Auto-Discovery (mDNS/Zeroconf)")
-        _listener.start()
+        # ❗ Zeroconf 內部會在 event loop 上排程，用 executor 避免 EventLoopBlocked
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _listener.start)
         logger.info("   等待 Worker 節點自動上線...")
     else:
         logger.info("   模式: 📋 Manual (NODE_URLS)")
@@ -227,7 +229,7 @@ async def lifespan(app: FastAPI):
 
     logger.info("🛑 Coordinator 正在關閉...")
     if _listener is not None:
-        _listener.stop()
+        await asyncio.get_running_loop().run_in_executor(None, _listener.stop)
 
 
 # ─────────────────────────────────────────────

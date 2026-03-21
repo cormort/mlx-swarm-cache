@@ -20,6 +20,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 
+import asyncio
 import mlx.core as mx
 
 import msgpack
@@ -66,13 +67,16 @@ async def lifespan(app: FastAPI):
         end_layer=END_LAYER,
     )
     logger.info("🟢 啟動 Worker 節點 [%s]，準備廣播 mDNS...", NODE_ID)
-    announcer.register()
+    # ❗ Zeroconf 的 register_service 內部會在 event loop 上排程，
+    #    必須在背景執行緒中執行，否則會觸發 EventLoopBlocked。
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, announcer.register)
 
     yield  # 將控制權交給 FastAPI，開始處理 Request
 
     # --- Server 關閉時執行 ---
     logger.info("🛑 [%s] 正在關閉，移除 mDNS 廣播...", NODE_ID)
-    announcer.unregister()
+    await loop.run_in_executor(None, announcer.unregister)
     if worker:
         worker.shutdown()
 
