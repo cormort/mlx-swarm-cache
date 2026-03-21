@@ -24,7 +24,9 @@ coordinator.py — 叢集指揮官
 """
 
 import asyncio
+import logging
 import os
+import pathlib
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -42,6 +44,8 @@ from pydantic import BaseModel
 
 from src.discovery.listener import SwarmListener
 
+logger = logging.getLogger("mlx-swarm")
+
 # ─────────────────────────────────────────────
 # 叢集節點設定（支援 Auto-Discovery 與手動模式）
 # ─────────────────────────────────────────────
@@ -54,11 +58,8 @@ _MANUAL_NODE_URLS: list[str] = [
     u.strip() for u in os.getenv("NODE_URLS", _default_urls).split(",") if u.strip()
 ]
 
-# 自動模式：建立 mDNS 監聽器
+# 自動模式：SwarmListener 實例延遲至 lifespan 建立，避免 import 副作用
 _listener: SwarmListener | None = None
-
-if DISCOVERY_MODE == "auto":
-    _listener = SwarmListener()
 
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", 120))
 
@@ -94,7 +95,7 @@ def text_to_embeddings(prompt: str) -> mx.array:
         token_ids = tokenizer.encode(prompt)
         return embedding_table[token_ids]   # shape: (1, seq_len, dim)
     """
-    print(f"✍️  使用者輸入: '{prompt}'")
+    logger.info("✍️  使用者輸入: '%s'", prompt)
     return mx.random.uniform(shape=(1, 16, 4096))
 
 
@@ -148,16 +149,16 @@ def call_worker_node(
         return output_tensor, data["compute_time_ms"]
 
     except requests.exceptions.Timeout:
-        print(f"❌ 節點 {url} 請求逾時（>{REQUEST_TIMEOUT}s）")
+        logger.error("❌ 節點 %s 請求逾時（>%ss）", url, REQUEST_TIMEOUT)
         return None, 0.0
     except requests.exceptions.ConnectionError:
-        print(f"❌ 無法連線至節點 {url}，請確認節點是否已啟動")
+        logger.error("❌ 無法連線至節點 %s，請確認節點是否已啟動", url)
         return None, 0.0
     except requests.exceptions.RequestException as e:
-        print(f"❌ 呼叫節點 {url} 失敗: {e}")
+        logger.error("❌ 呼叫節點 %s 失敗: %s", url, e)
         return None, 0.0
     except Exception as e:
-        print(f"❌ 解析節點 {url} 回傳資料失敗: {e}")
+        logger.error("❌ 解析節點 %s 回傳資料失敗: %s", url, e)
         return None, 0.0
 
 
@@ -174,7 +175,7 @@ def generate_step(block_id: str, current_hidden_states: mx.array) -> mx.array | 
     node_urls = get_active_node_urls()
 
     if not node_urls:
-        print("❌ 沒有可用的 Worker 節點！請確認節點已啟動。")
+        logger.error("❌ 沒有可用的 Worker 節點！請確認節點已啟動。")
         return None
 
     step_start = time.time()
@@ -182,7 +183,7 @@ def generate_step(block_id: str, current_hidden_states: mx.array) -> mx.array | 
     timings: list[float] = []
 
     for i, url in enumerate(node_urls, start=1):
-        print(f"\n🏃 [第{i}棒] 傳送資料至 Node {i} ({url})...")
+        logger.info("🏃 [第%d棒] 傳送資料至 Node %d (%s)...", i, i, url)
         states, t = call_worker_node(url, block_id, states)
         if states is None:
             # 發生連線錯誤或 Timeout，如果是 Auto 模式則強制剔除殭屍節點
@@ -194,7 +195,7 @@ def generate_step(block_id: str, current_hidden_states: mx.array) -> mx.array | 
 
     total_time = (time.time() - step_start) * 1000
     timing_str = ", ".join(f"N{i + 1}: {t:.2f} ms" for i, t in enumerate(timings))
-    print(f"✨ {block_id} 推理完成！(總耗時: {total_time:.2f} ms | {timing_str})")
+    logger.info("✨ %s 推理完成！(總耗時: %.2f ms | %s)", block_id, total_time, timing_str)
 
     # 最終輸出的隱藏層狀態
     return states
@@ -206,23 +207,25 @@ def generate_step(block_id: str, current_hidden_states: mx.array) -> mx.array | 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _listener
     port = int(os.getenv("COORDINATOR_PORT", 8080))
-    print("=" * 50)
-    print(f"🚀 MLX-Swarm-Cache 指揮官 API Gateway 已啟動 (Port {port})")
+    logger.info("=" * 50)
+    logger.info("🚀 MLX-Swarm-Cache 指揮官 API Gateway 已啟動 (Port %d)", port)
 
-    if DISCOVERY_MODE == "auto" and _listener is not None:
-        print("   模式: 🔍 Auto-Discovery (mDNS/Zeroconf)")
+    if DISCOVERY_MODE == "auto":
+        _listener = SwarmListener()
+        logger.info("   模式: 🔍 Auto-Discovery (mDNS/Zeroconf)")
         _listener.start()
-        print("   等待 Worker 節點自動上線...")
+        logger.info("   等待 Worker 節點自動上線...")
     else:
-        print("   模式: 📋 Manual (NODE_URLS)")
+        logger.info("   模式: 📋 Manual (NODE_URLS)")
         for i, url in enumerate(_MANUAL_NODE_URLS, start=1):
-            print(f"   Node {i}: {url}")
-    print("=" * 50)
+            logger.info("   Node %d: %s", i, url)
+    logger.info("=" * 50)
 
     yield  # 交出控制權給 FastAPI 執行期間
 
-    print("\n🛑 Coordinator 正在關閉...")
+    logger.info("🛑 Coordinator 正在關閉...")
     if _listener is not None:
         _listener.stop()
 
@@ -291,15 +294,19 @@ async def download_model(req: DownloadRequest):
     local_dir = os.path.join(MODELS_DIR, repo_id)
     
     def _do_download():
-        print(f"📥 開始從 HuggingFace 下載模型: {repo_id} -> {local_dir}")
+        logger.info("📥 開始從 HuggingFace 下載模型: %s -> %s", repo_id, local_dir)
         try:
             snapshot_download(repo_id, local_dir=local_dir)
-            print(f"✅ 模型 {repo_id} 下載完成")
+            logger.info("✅ 模型 %s 下載完成", repo_id)
         except Exception as e:
-            print(f"❌ 模型 {repo_id} 下載失敗: {e}")
-            
-    loop = asyncio.get_running_loop()
-    loop.run_in_executor(_download_executor, _do_download)
+            logger.error("❌ 模型 %s 下載失敗: %s", repo_id, e)
+
+    async def _bg_download():
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(_download_executor, _do_download)
+
+    task = asyncio.create_task(_bg_download())
+    task.add_done_callback(lambda t: t.result() if not t.cancelled() else None)
     return {"status": "downloading", "repo_id": repo_id, "local_dir": local_dir}
 
 
@@ -361,7 +368,7 @@ async def chat_completions(req: ChatCompletionRequest):
         raise HTTPException(status_code=400, detail="Messages array cannot be empty")
 
     prompt = req.messages[-1].content
-    print(f"\n🔗 [Gateway] 收到外部 API 請求: '{prompt}'")
+    logger.info("🔗 [Gateway] 收到外部 API 請求: '%s'", prompt)
 
     current_states = text_to_embeddings(prompt)
     generated_blocks = 0
@@ -404,8 +411,9 @@ async def chat_completions(req: ChatCompletionRequest):
     )
 
 # 掛載網頁管理前端 (必須在所有 API 靜態路由宣告之後)
-if os.path.exists("src/web"):
-    app.mount("/", StaticFiles(directory="src/web", html=True), name="web")
+_WEB_DIR = pathlib.Path(__file__).resolve().parent.parent / "web"
+if _WEB_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(_WEB_DIR), html=True), name="web")
 
 
 if __name__ == "__main__":

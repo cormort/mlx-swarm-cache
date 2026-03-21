@@ -15,13 +15,13 @@ api_server.py — Worker FastAPI 服務（步驟四）
     正式環境應改用 Thunderbolt RPC + 二進位序列化（例如 numpy buffer 或 msgpack）。
 """
 
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
 
 import mlx.core as mx
 
-# 新增 import
 import msgpack
 import numpy as np
 import uvicorn
@@ -29,6 +29,8 @@ from fastapi import FastAPI, HTTPException, Request, Response
 
 from src.discovery.announcer import SwarmAnnouncer
 from src.node.worker_core import ExoWorkerNode
+
+logger = logging.getLogger("mlx-swarm")
 
 # ─────────────────────────────────────────────
 # 節點全域狀態（從環境變數讀取）
@@ -39,19 +41,9 @@ START_LAYER = int(os.getenv("START_LAYER", 0))
 END_LAYER = int(os.getenv("END_LAYER", 16))
 PORT = int(os.getenv("PORT", 8000))
 
-worker = ExoWorkerNode(
-    node_id=NODE_ID,
-    assigned_layers=range(START_LAYER, END_LAYER),
-    max_ram_blocks=5,
-)
-
-# 初始化廣播器
-announcer = SwarmAnnouncer(
-    node_id=NODE_ID,
-    port=PORT,
-    start_layer=START_LAYER,
-    end_layer=END_LAYER,
-)
+# Worker 與廣播器延遲至 lifespan 再初始化，避免 import 副作用
+worker: ExoWorkerNode | None = None
+announcer: SwarmAnnouncer | None = None
 
 # ─────────────────────────────────────────────
 # 生命週期管理 (Lifespan)
@@ -60,15 +52,29 @@ announcer = SwarmAnnouncer(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global worker, announcer
     # --- Server 啟動前執行 ---
-    print(f"🟢 啟動 Worker 節點 [{NODE_ID}]，準備廣播 mDNS...")
+    worker = ExoWorkerNode(
+        node_id=NODE_ID,
+        assigned_layers=range(START_LAYER, END_LAYER),
+        max_ram_blocks=5,
+    )
+    announcer = SwarmAnnouncer(
+        node_id=NODE_ID,
+        port=PORT,
+        start_layer=START_LAYER,
+        end_layer=END_LAYER,
+    )
+    logger.info("🟢 啟動 Worker 節點 [%s]，準備廣播 mDNS...", NODE_ID)
     announcer.register()
 
     yield  # 將控制權交給 FastAPI，開始處理 Request
 
     # --- Server 關閉時執行 ---
-    print(f"\n🛑 [{NODE_ID}] 正在關閉，移除 mDNS 廣播...")
+    logger.info("🛑 [%s] 正在關閉，移除 mDNS 廣播...", NODE_ID)
     announcer.unregister()
+    if worker:
+        worker.shutdown()
 
 
 # ─────────────────────────────────────────────
@@ -125,7 +131,7 @@ async def forward_pass(request: Request):
         data = msgpack.unpackb(raw_body, raw=False)
         block_id = data["block_id"]
 
-        print(f"\n[{NODE_ID}] 🌐 收到 API 請求，處理 Block: {block_id}")
+        logger.info("[%s] 🌐 收到 API 請求，處理 Block: %s", NODE_ID, block_id)
 
         # 1. 反序列化：bytes -> numpy -> MLX Tensor
         # msgpack 經常會把 bytes 轉成 bytes object, 我們透過 np.frombuffer 轉回數值陣列
@@ -139,7 +145,7 @@ async def forward_pass(request: Request):
         hidden_states_tensor = mx.array(np_array)
 
         # 2. 執行推理（含自動 SSD KV Cache 管理）
-        output_tensor = worker.forward_pass(hidden_states_tensor, block_id)
+        output_tensor = worker.forward_pass(hidden_states_tensor, block_id)  # type: ignore[union-attr]
 
         # 3. 序列化：MLX Tensor -> numpy -> bytes
         # 注意 MLX tensor 先轉 numpy 才能取得底層 bytes
@@ -147,7 +153,7 @@ async def forward_pass(request: Request):
         out_bytes = out_np.tobytes()
 
         compute_time_ms = (time.time() - start_time) * 1000
-        print(f"[{NODE_ID}] ✅ 處理完成，耗時 {compute_time_ms:.2f} ms")
+        logger.info("[%s] ✅ 處理完成，耗時 %.2f ms", NODE_ID, compute_time_ms)
 
         response_data = {
             "block_id": block_id,
@@ -161,7 +167,7 @@ async def forward_pass(request: Request):
         return Response(content=packed_response, media_type="application/msgpack")
 
     except Exception as e:
-        print(f"[{NODE_ID}] ❌ 處理失敗: {e}")
+        logger.error("[%s] ❌ 處理失敗: %s", NODE_ID, e)
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 

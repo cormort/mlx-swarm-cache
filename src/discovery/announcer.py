@@ -17,10 +17,13 @@ announcer.py — Worker 節點 mDNS 廣播器
   announcer.unregister()  # 優雅關閉：移除廣播
 """
 
+import logging
 import os
 import socket
 
 from zeroconf import ServiceInfo, Zeroconf
+
+logger = logging.getLogger("mlx-swarm")
 
 SERVICE_TYPE = "_mlx-swarm._tcp.local."
 
@@ -74,10 +77,9 @@ class SwarmAnnouncer:
         )
 
         self._zeroconf.register_service(self._info)
-        print(
-            f"📡 [{self.node_id}] mDNS 廣播已啟動 "
-            f"(IP: {local_ip}, Port: {self.port}, "
-            f"Layers: {self.start_layer}-{self.end_layer - 1})"
+        logger.info(
+            "📡 [%s] mDNS 廣播已啟動 (IP: %s, Port: %d, Layers: %d-%d)",
+            self.node_id, local_ip, self.port, self.start_layer, self.end_layer - 1,
         )
 
     def unregister(self) -> None:
@@ -91,12 +93,12 @@ class SwarmAnnouncer:
             try:
                 self._zeroconf.unregister_service(self._info)
             except Exception as e:
-                print(f"⚠️ mDNS 服務解除註冊發生錯誤: {e}")
+                logger.warning("⚠️ mDNS 服務解除註冊發生錯誤: %s", e)
             finally:
                 self._zeroconf.close()
                 self._zeroconf = None
                 self._info = None
-                print(f"👋 已停止 mDNS 廣播 Node [{self.node_id}]")
+                logger.info("👋 已停止 mDNS 廣播 Node [%s]", self.node_id)
 
     @staticmethod
     def _get_local_ip() -> str:

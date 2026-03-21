@@ -17,10 +17,13 @@ listener.py — Coordinator mDNS 監聽器
   listener.stop()
 """
 
+import logging
 import socket
 import threading
 
 from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
+
+logger = logging.getLogger("mlx-swarm")
 
 SERVICE_TYPE = "_mlx-swarm._tcp.local."
 
@@ -72,7 +75,7 @@ class SwarmListener(ServiceListener):
         """開始在區域網路中監聽 Worker 節點的 mDNS 廣播。"""
         self._zeroconf = Zeroconf()
         self._browser = ServiceBrowser(self._zeroconf, SERVICE_TYPE, self)
-        print(f"👂 Coordinator 已開始監聽 mDNS 廣播 (類型: {SERVICE_TYPE})")
+        logger.info("👂 Coordinator 已開始監聽 mDNS 廣播 (類型: %s)", SERVICE_TYPE)
 
     def stop(self) -> None:
         """停止監聽並釋放資源。"""
@@ -80,7 +83,7 @@ class SwarmListener(ServiceListener):
             self._zeroconf.close()
             self._zeroconf = None
             self._browser = None
-            print("👂 Coordinator mDNS 監聽已關閉")
+            logger.info("👂 Coordinator mDNS 監聽已關閉")
 
     # ── ServiceListener 介面實作 ─────────────────────────────────────────
 
@@ -118,9 +121,9 @@ class SwarmListener(ServiceListener):
         with self._lock:
             self._nodes[name] = node
 
-        print(
-            f"🟢 發現新節點: [{node_id}] "
-            f"({host}:{port}, Layers: {start_layer}-{end_layer - 1})"
+        logger.info(
+            "🟢 發現新節點: [%s] (%s:%d, Layers: %d-%d)",
+            node_id, host, port, start_layer, end_layer - 1,
         )
 
     def remove_service(self, zc: Zeroconf, type_: str, name: str) -> None:
@@ -129,7 +132,7 @@ class SwarmListener(ServiceListener):
             node = self._nodes.pop(name, None)
 
         if node:
-            print(f"🔴 節點離線: [{node.node_id}]")
+            logger.info("🔴 節點離線: [%s]", node.node_id)
 
     def update_service(self, zc: Zeroconf, type_: str, name: str) -> None:
         """當 Worker 節點資訊更新時觸發（重新解析）。"""
@@ -176,9 +179,9 @@ class SwarmListener(ServiceListener):
                     target_key = key
                     break
 
-            if target_key:
+            if target_key is not None:
                 node = self._nodes.pop(target_key)
-                print(f"👻 偵測到殭屍節點，已強制剔除: [{node.node_id}]")
+                logger.info("👻 偵測到殭屍節點，已強制剔除: [%s]", node.node_id)
 
     @property
     def node_count(self) -> int:

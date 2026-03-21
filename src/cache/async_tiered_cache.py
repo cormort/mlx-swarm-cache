@@ -19,6 +19,7 @@ async_tiered_cache.py — 分層 KV Cache（含同步與非同步版本）
     同時競爭磁碟頻寬。
 """
 
+import logging
 import os
 import queue
 import threading
@@ -26,6 +27,8 @@ import time
 from collections import OrderedDict
 
 import mlx.core as mx
+
+logger = logging.getLogger("mlx-swarm")
 
 # ─────────────────────────────────────────────
 # 步驟一：同步版本（概念驗證用）
@@ -39,7 +42,7 @@ class TieredKVCache:
         self.ram_cache: OrderedDict = OrderedDict()
         self.ssd_index: set = set()
         os.makedirs(self.cache_dir, exist_ok=True)
-        print(f"📁 已建立 SSD 快取資料夾: {self.cache_dir}")
+        logger.info("📁 已建立 SSD 快取資料夾: %s", self.cache_dir)
 
     @staticmethod
     def _safe_block_id(block_id: str) -> str:
@@ -74,7 +77,7 @@ class TieredKVCache:
         filepath = self._get_filepath(lru_block_id)
         mx.save_safetensors(filepath, tensors)
         self.ssd_index.add(lru_block_id)
-        print(f"  ⚠️  RAM 已滿！已將 Block {lru_block_id} 卸載至 SSD: {filepath}")
+        logger.info("  ⚠️  RAM 已滿！已將 Block %s 卸載至 SSD: %s", lru_block_id, filepath)
 
     def _load_from_ssd(self, block_id: str):
         filepath = self._get_filepath(block_id)
@@ -130,6 +133,7 @@ class AsyncTieredKVCache:
         self.ssd_index: set = set()
         self.pending_ssd: set = set()
         self._lock = threading.Lock()
+        self._write_events: dict[str, threading.Event] = {}  # #7: 取代 busy-wait
         os.makedirs(self.cache_dir, exist_ok=True)
 
         self._owns_thread = io_queue is None
@@ -169,14 +173,14 @@ class AsyncTieredKVCache:
             try:
                 mx.save_safetensors(filepath, tensors)
             except Exception as e:
-                print(f"  [背景 I/O] ❌ Block {block_id} 寫入失敗: {e}")
+                logger.error("  [背景 I/O] ❌ Block %s 寫入失敗: %s", block_id, e)
                 self.io_queue.task_done()
                 continue
             write_time = time.time() - start_write
             on_written(block_id)
-            print(
-                f"  [背景 I/O] 💾 成功將 Block {block_id} 寫入 SSD "
-                f"(耗時 {write_time:.4f} 秒)"
+            logger.info(
+                "  [背景 I/O] 💾 成功將 Block %s 寫入 SSD (耗時 %.4f 秒)",
+                block_id, write_time,
             )
             self.io_queue.task_done()
 
@@ -209,6 +213,8 @@ class AsyncTieredKVCache:
                 lru_block_id, tensors = self.ram_cache.popitem(last=False)
                 filepath = self._get_filepath(lru_block_id)
                 self.pending_ssd.add(lru_block_id)
+                # 建立寫入完成事件，供讀取端等待
+                self._write_events[lru_block_id] = threading.Event()
                 evict_task = (lru_block_id, tensors, filepath)
 
         if evict_task:
@@ -216,12 +222,12 @@ class AsyncTieredKVCache:
             try:
                 mx.eval(ts["k"], ts["v"])
                 self.io_queue.put((bid, ts, fp, self._on_written))
-                print(
-                    f"  ⚡️ [主執行緒] 已將 Block {bid} 的卸載任務"
-                    " 派發給背景 Queue，繼續全速運算！"
+                logger.debug(
+                    "  ⚡️ [主執行緒] 已將 Block %s 的卸載任務派發給背景 Queue",
+                    bid,
                 )
             except Exception as e:
-                print(f"  [主執行緒] ❌ Block {bid} 預處理失敗: {e}")
+                logger.error("  [主執行緒] ❌ Block %s 預處理失敗: %s", bid, e)
                 with self._lock:
                     self.pending_ssd.discard(bid)
 
@@ -263,7 +269,7 @@ class AsyncTieredKVCache:
             # 加入 None 毒藥讓 I/O 執行緒停止
             self.io_queue.put(None)
             self.io_thread.join()
-            print("🛑 背景 SSD 執行緒已安全關閉。")
+            logger.info("🛑 背景 SSD 執行緒已安全關閉。")
 
     def prefetch_block(self, block_id: str) -> bool:
         """
@@ -281,6 +287,10 @@ class AsyncTieredKVCache:
         with self._lock:
             self.ssd_index.add(block_id)
             self.pending_ssd.discard(block_id)
+            # 通知等待中的讀取端
+            event = self._write_events.pop(block_id, None)
+        if event:
+            event.set()
 
     # def _async_evict_lru_to_ssd_locked(self) -> None: (Removed)
 
@@ -288,22 +298,23 @@ class AsyncTieredKVCache:
         """
         同步從 SSD 讀回 RAM。
 
-        若 block 仍在 pending_ssd（背景尚未落盤），輪詢等待檔案出現，
-        最多等待 _SSD_WAIT_TIMEOUT 秒（Bug #2 修正）。
+        若 block 仍在 pending_ssd（背景尚未落盤），等待 threading.Event，
+        最多等待 _SSD_WAIT_TIMEOUT 秒（Bug #2 + #7 修正）。
         """
-        filepath = self._get_filepath(block_id)
-        deadline = time.time() + self._SSD_WAIT_TIMEOUT
+        # 先取得對應的 event（如果有的話）
+        with self._lock:
+            event = self._write_events.get(block_id)
 
-        while not os.path.exists(filepath):
-            if time.time() > deadline:
+        if event:
+            if not event.wait(timeout=self._SSD_WAIT_TIMEOUT):
                 raise TimeoutError(
                     f"Block {block_id} 的 SSD 寫入等待逾時"
                     f"（>{self._SSD_WAIT_TIMEOUT}s），"
                     "請檢查磁碟空間或 I/O 執行緒是否正常運作。"
                 )
-            time.sleep(self._SSD_WAIT_POLL)
 
-        print(f"  ⏳ [主執行緒/背景] Block {block_id} 從 SSD 載入...")
+        filepath = self._get_filepath(block_id)
+        logger.debug("  ⏳ Block %s 從 SSD 載入...", block_id)
         tensors = mx.load(filepath)
         k_tensor, v_tensor = tensors["k"], tensors["v"]
         return k_tensor, v_tensor
