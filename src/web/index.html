@@ -32,9 +32,15 @@
                     <p class="text-sm text-slate-400">Distributed Inference Engine</p>
                 </div>
             </div>
-            <div class="flex items-center space-x-2 bg-slate-800 px-4 py-2 rounded-full border border-slate-700">
-                <span class="status-dot blinking"></span>
-                <span class="text-sm font-medium" x-text="`Cluster Active (${nodeCount} Nodes)`"></span>
+            <div class="flex items-center space-x-3">
+                <div class="flex items-center space-x-2 bg-slate-800 px-4 py-2 rounded-full border border-slate-700">
+                    <span class="status-dot blinking"></span>
+                    <span class="text-sm font-medium" x-text="`Cluster Active (${nodeCount} Nodes)`"></span>
+                </div>
+                <div class="flex items-center space-x-2 bg-slate-800 px-3 py-2 rounded-full border border-slate-700">
+                    <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>
+                    <input x-model="apiKey" type="password" placeholder="API Key" class="bg-transparent border-none text-sm text-white focus:outline-none w-32 placeholder-slate-500">
+                </div>
             </div>
         </header>
 
@@ -169,6 +175,7 @@
                 downloadRepo: '',
                 isDownloading: false,
                 downloadStatus: '',
+                apiKey: '',
                 
                 chatHistory: [
                     { role: 'assistant', content: 'Hello! I am ready to process tasks across the MLX Swarm. Connect some worker nodes and let\'s begin.' }
@@ -208,9 +215,11 @@
                     this.isDownloading = true;
                     this.downloadStatus = 'Initiating download (check terminal for logs)...';
                     try {
+                        const headers = { 'Content-Type': 'application/json' };
+                        if (this.apiKey) headers['Authorization'] = `Bearer ${this.apiKey}`;
                         const res = await fetch('/v1/models/download', {
                             method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
+                            headers,
                             body: JSON.stringify({ repo_id: this.downloadRepo.trim() })
                         });
                         const data = await res.json();
@@ -246,9 +255,12 @@
                             max_tokens: 30
                         };
 
+                        const headers = { 'Content-Type': 'application/json' };
+                        if (this.apiKey) headers['Authorization'] = `Bearer ${this.apiKey}`;
+
                         const res = await fetch('/v1/chat/completions', {
                             method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
+                            headers,
                             body: JSON.stringify(payload)
                         });
 

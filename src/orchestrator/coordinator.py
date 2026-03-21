@@ -417,6 +417,10 @@ if _WEB_DIR.exists():
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
     port = int(os.getenv("COORDINATOR_PORT", 8080))
     # 透過字串匯入可讓 uvicorn 平滑處理 worker 行程
     uvicorn.run("src.orchestrator.coordinator:app", host="0.0.0.0", port=port)

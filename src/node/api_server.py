@@ -176,5 +176,9 @@ async def forward_pass(request: Request):
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
     # 注意：字串格式的 app 參考能讓 uvicorn 更好地管理 worker processes
     uvicorn.run("src.node.api_server:app", host="0.0.0.0", port=PORT)
