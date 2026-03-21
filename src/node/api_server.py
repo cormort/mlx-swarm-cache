@@ -17,6 +17,7 @@ api_server.py — Worker FastAPI 服務（步驟四）
 
 import os
 import time
+from contextlib import asynccontextmanager
 
 import mlx.core as mx
 
@@ -26,6 +27,7 @@ import numpy as np
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
 
+from src.discovery.announcer import SwarmAnnouncer
 from src.node.worker_core import ExoWorkerNode
 
 # ─────────────────────────────────────────────
@@ -43,6 +45,32 @@ worker = ExoWorkerNode(
     max_ram_blocks=5,
 )
 
+# 初始化廣播器
+announcer = SwarmAnnouncer(
+    node_id=NODE_ID,
+    port=PORT,
+    start_layer=START_LAYER,
+    end_layer=END_LAYER,
+)
+
+# ─────────────────────────────────────────────
+# 生命週期管理 (Lifespan)
+# ─────────────────────────────────────────────
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- Server 啟動前執行 ---
+    print(f"🟢 啟動 Worker 節點 [{NODE_ID}]，準備廣播 mDNS...")
+    announcer.register()
+
+    yield  # 將控制權交給 FastAPI，開始處理 Request
+
+    # --- Server 關閉時執行 ---
+    print(f"\n🛑 [{NODE_ID}] 正在關閉，移除 mDNS 廣播...")
+    announcer.unregister()
+
+
 # ─────────────────────────────────────────────
 # FastAPI 應用與資料模型
 # ─────────────────────────────────────────────
@@ -53,6 +81,7 @@ app = FastAPI(
         f"Worker node [{NODE_ID}] handling layers {START_LAYER}-{END_LAYER - 1}"
     ),
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # 移除 Pydantic 模型，改用 Request/Response 處理 raw bytes
@@ -141,26 +170,5 @@ async def forward_pass(request: Request):
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import signal
-
-    from src.discovery.announcer import SwarmAnnouncer
-
-    announcer = SwarmAnnouncer(
-        node_id=NODE_ID,
-        port=PORT,
-        start_layer=START_LAYER,
-        end_layer=END_LAYER,
-    )
-
-    def _shutdown_handler(sig, frame):
-        """捕捉 SIGINT/SIGTERM，優雅關閉 mDNS 廣播。"""
-        print(f"\n🛑 [{NODE_ID}] 收到關閉訊號，正在移除 mDNS 廣播...")
-        announcer.unregister()
-        raise SystemExit(0)
-
-    signal.signal(signal.SIGINT, _shutdown_handler)
-    signal.signal(signal.SIGTERM, _shutdown_handler)
-
-    print(f"🟢 啟動 Worker 節點 [{NODE_ID}]，監聽 port {PORT}")
-    announcer.register()
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    # 注意：字串格式的 app 參考能讓 uvicorn 更好地管理 worker processes
+    uvicorn.run("src.node.api_server:app", host="0.0.0.0", port=PORT)
