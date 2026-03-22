@@ -6,8 +6,6 @@ api_server.py — Worker FastAPI 服務（步驟四）
 
 啟動方式：
     export NODE_ID="mac_mini_m4"
-    export START_LAYER=0
-    export END_LAYER=16
     export PORT=8000
     python -m src.node.api_server
 
@@ -15,14 +13,13 @@ api_server.py — Worker FastAPI 服務（步驟四）
     正式環境應改用 Thunderbolt RPC + 二進位序列化（例如 numpy buffer 或 msgpack）。
 """
 
+import asyncio
 import logging
 import os
 import time
 from contextlib import asynccontextmanager
 
-import asyncio
 import mlx.core as mx
-
 import msgpack
 import numpy as np
 import uvicorn
@@ -38,8 +35,6 @@ logger = logging.getLogger("mlx-swarm")
 # ─────────────────────────────────────────────
 
 NODE_ID = os.getenv("NODE_ID", "default_node")
-START_LAYER = int(os.getenv("START_LAYER", 0))
-END_LAYER = int(os.getenv("END_LAYER", 16))
 PORT = int(os.getenv("PORT", 8000))
 
 # Worker 與廣播器延遲至 lifespan 再初始化，避免 import 副作用
@@ -57,14 +52,11 @@ async def lifespan(app: FastAPI):
     # --- Server 啟動前執行 ---
     worker = ExoWorkerNode(
         node_id=NODE_ID,
-        assigned_layers=range(START_LAYER, END_LAYER),
         max_ram_blocks=5,
     )
     announcer = SwarmAnnouncer(
         node_id=NODE_ID,
         port=PORT,
-        start_layer=START_LAYER,
-        end_layer=END_LAYER,
     )
     logger.info("🟢 啟動 Worker 節點 [%s]，準備廣播 mDNS...", NODE_ID)
     # ❗ Zeroconf 的 register_service 內部會在 event loop 上排程，
@@ -88,13 +80,19 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="MLX-Swarm-Cache Worker",
     description=(
-        f"Worker node [{NODE_ID}] handling layers {START_LAYER}-{END_LAYER - 1}"
+        f"Worker node [{NODE_ID}] (Dynamic Model Loading Framework)"
     ),
     version="0.1.0",
     lifespan=lifespan,
 )
 
-# 移除 Pydantic 模型，改用 Request/Response 處理 raw bytes
+from pydantic import BaseModel
+
+
+class LoadRequest(BaseModel):
+    repo_id: str
+    start_layer: int
+    end_layer: int
 
 # ─────────────────────────────────────────────
 # 端點
@@ -107,8 +105,35 @@ async def health_check():
     return {
         "status": "ok",
         "node_id": NODE_ID,
-        "layers": f"{START_LAYER}-{END_LAYER - 1}",
+        "layers": worker.assigned_layers if worker else [],
+        "loaded_model": worker.model_path if worker else None,
     }
+
+@app.post("/load")
+async def load_model(req: LoadRequest):
+    """由 Coordinator 呼叫，載入指定模型與負責層。"""
+    if not worker:
+        raise HTTPException(status_code=503, detail="Worker not initialized")
+    start = time.time()
+    logger.info("[%s] 收到了載入模型指令: %s, layers %d-%d", NODE_ID, req.repo_id, req.start_layer, req.end_layer)
+    try:
+        loop = asyncio.get_running_loop()
+        layers_to_load = list(range(req.start_layer, req.end_layer))
+        await loop.run_in_executor(None, lambda: worker.load_model(req.repo_id, layers_to_load))
+        elapsed = time.time() - start
+        return {"status": "ok", "message": f"載入完成，耗時 {elapsed:.2f} 秒"}
+    except Exception as e:
+        logger.error("[%s] 載入模型失敗: %s", NODE_ID, str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/unload")
+async def unload_model():
+    """由 Coordinator 呼叫，釋放模型記憶體。"""
+    if not worker:
+        return {"status": "error", "detail": "Worker not initialized"}
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, worker.unload_model)
+    return {"status": "ok"}
 
 
 @app.post("/forward")

@@ -21,7 +21,7 @@ An experimental distributed LLM inference engine for Apple Silicon, combining th
          │  HTTP /forward
     ┌────▼────┐       ┌─────────────┐
     │  Node 1  │──────▶│   Node 2    │
-    │ Layer 0-15│      │ Layer 16-31 │
+    │ 動態分配層級│      │ 動態分配層級 │
     │ Mac mini │       │ MacBook Air │
     └────┬─────┘       └──────┬──────┘
          │                    │
@@ -43,6 +43,7 @@ mlx-swarm-cache/
 ├── .gitignore
 ├── README.md
 ├── requirements.txt
+├── 啟動程式.command          # 本地一鍵測試腳本
 ├── src/
 │   ├── cache/
 │   │   └── async_tiered_cache.py   # 背景異步 SSD 快取機制
@@ -75,23 +76,19 @@ pip install -r requirements.txt
 
 ### 2. 啟動 Worker 節點 (Worker Nodes)
 
-每台 Mac (或同機器的不同 Process) 負責處理不同範圍的神經網路層 (`START_LAYER` 到 `END_LAYER`)。
+每台 Mac (或同機器的不同 Process) 作為獨立節點啟動，不預設層數，而是由 Coordinator 載入模型時動態分配。
 
-#### 在 Node 1 (例如 Mac mini M4, 負責前 16 層)
+#### 在 Node 1 (例如 Mac mini M4)
 ```bash
 export NODE_ID="mac_mini_m4"
-export START_LAYER=0
-export END_LAYER=16
 export PORT=8000
 # 監聽所有網卡 0.0.0.0 (便於跨機器連線)
 python -m src.node.api_server
 ```
 
-#### 在 Node 2 (例如 MacBook Air, 負責後 16 層)
+#### 在 Node 2 (例如 MacBook Air)
 ```bash
 export NODE_ID="macbook_air"
-export START_LAYER=16
-export END_LAYER=32
 export PORT=8001
 python -m src.node.api_server
 ```
@@ -168,14 +165,14 @@ python -m pytest tests/ -v
 - ✅ `test_path_traversal_blocked`: 確認異步版同樣具備防禦路徑穿越漏洞的安全控制。
 - ⏭️ `test_ssd_index_no_race_condition`: *(Skipped)* 在 20 Thread 極限並發打穿卸載頻寬的壓力測試下，已知 MLX C++ 底層引擎的 `eval/load` 目前無法承受跨執行緒的交錯綁定，會在引擎層級觸發 `Segmentation fault`。該測試已設為 Skip，不影響一般分散式架構下的正常推理。
 
-### 3. 區域網路自動尋找測試 (`test_discovery.py`)
+### 3. 分散式推理與發現機制 (`test_discovery.py` & `test_e2e_pipeline.py`)
 - ✅ `test_register_and_unregister`: 廣播器能成功註冊與取消 mDNS 服務。
 - ✅ `test_listener_discovers_announcer`: 監聽器能自動偵測到新上線的節點廣播。
-- ✅ `test_nodes_sorted_by_start_layer`: 多個節點能依據 `start_layer` 正確排序。
 - ✅ `test_node_removal_on_unregister`: 節點取消廣播後，監聽器會自動將其從可用清單移除。
-- ✅ `test_manual_mode_uses_node_urls`: 手動模式能向後相容讀取 `NODE_URLS` 環境變數。
+- ✅ `test_distributed_load_model`: Coordinator 能夠正確從 HuggingFace 拉取模型層數，並完美切割發送至多台 Worker。
+- ✅ `test_e2e_pipeline`: 成功端對端驗證 NetworkSwarmLayer 跨網路請求生成對話。
 
-> **最終執行結果**: `23 passed, 1 skipped in 14.04s` (核心邏輯與連線機制全數通過)
+> **最新執行結果**: `30+ passed, 1 skipped` (核心邏輯、網路分派與連線機制全數通過)
 
 ## 設計決策
 

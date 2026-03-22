@@ -33,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 import mlx.core as mx
+import mlx.nn as nn
 import msgpack
 import numpy as np
 import requests
@@ -63,6 +64,44 @@ _listener: SwarmListener | None = None
 
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", 120))
 
+class NetworkSwarmLayer(nn.Module):
+    """代理網路模型的單一巨大神經網路層。
+    
+    將此層塞入 mlx_lm 模型架構中取代真實的 Transformer 層。
+    當 mlx_lm 的生成迴圈嘗試計算下一層時，我們攔截張量，並透過網路
+    將特徵發送給 Worker 接力計算，最後再接上本機的 LM Head 生成文字。
+    """
+    def __init__(self, session_id: str = "default_session"):
+        super().__init__()
+        self.session_id = session_id
+        # 欺騙 mlx-lm 的 make_prompt_cache 等內部檢測方法
+        self.use_sliding = False
+        self.use_sliding_window = False
+
+    def __call__(self, x, mask=None, cache=None):
+        # 將 x 送入叢集進行接力傳播
+        out = generate_step(self.session_id, x)
+        if out is None:
+            raise RuntimeError("分散式網路模型前向傳播失敗，叢集異常")
+        
+        # 欺騙 mlx-lm 的 KV Cache：
+        # mlx-lm 的 generator 會呼叫 mx.eval() 評估 cache.state，並檢查 cache.keys.shape
+        # 為了避免 AttributeError: 'NoneType' object has no attribute 'shape'，
+        # 我們手動塞入極小且無意義的 tensor，以維護 offset 狀態，騙過迴圈。
+        if cache is not None:
+            seq_len = x.shape[1]
+            step = getattr(cache, "step", 256)
+            if getattr(cache, "keys", None) is None:
+                cache.keys = mx.zeros((1, 1, seq_len + step, 1), dtype=x.dtype)
+                cache.values = mx.zeros((1, 1, seq_len + step, 1), dtype=x.dtype)
+                cache.offset = seq_len
+            else:
+                cache.offset += seq_len
+                if cache.offset > cache.keys.shape[2]:
+                    cache.keys = mx.zeros((1, 1, cache.offset + step, 1), dtype=x.dtype)
+                    cache.values = mx.zeros((1, 1, cache.offset + step, 1), dtype=x.dtype)
+                    
+        return out
 
 def get_active_node_urls() -> list[str]:
     """依當前模式取得排序過的 Worker 節點 URL 清單。
@@ -80,6 +119,12 @@ def get_active_node_urls() -> list[str]:
 
 # 模型下載用的共用執行緒池
 _download_executor = ThreadPoolExecutor(max_workers=2)
+
+# ── 全域模型狀態（mlx-lm） ──────────────────────────────────
+_loaded_model = None          # mlx_lm 的 model 物件
+_loaded_tokenizer = None      # mlx_lm 的 tokenizer
+_loaded_model_id: str | None = None  # 目前載入的 repo_id
+_model_loading = False        # 是否正在載入中
 
 
 # ─────────────────────────────────────────────
@@ -268,23 +313,183 @@ async def list_nodes():
 
 MODELS_DIR = os.getenv("MODELS_DIR", "./models")
 
+
 class DownloadRequest(BaseModel):
     repo_id: str
+
+
+class LoadRequest(BaseModel):
+    repo_id: str
+
 
 @app.get("/v1/models")
 async def list_models():
     """掃描本機下載儲存資料夾，列出已下載的 Hugging Face 模型清單。"""
     if not os.path.exists(MODELS_DIR):
         return {"models": []}
-    
+
     models = []
-    # 簡單邏輯：遞迴掃描資料夾，包含 config.json 的即視為一個有效的模型資料夾
     for root, dirs, files in os.walk(MODELS_DIR):
         if "config.json" in files:
             rel_path = os.path.relpath(root, MODELS_DIR)
-            models.append({"repo_id": rel_path, "local_path": root})
-            
+            models.append({
+                "repo_id": rel_path,
+                "local_path": root,
+                "loaded": rel_path == _loaded_model_id,
+            })
+
     return {"models": models}
+
+
+@app.get("/v1/models/status")
+async def model_status():
+    """查詢目前載入的模型狀態。"""
+    return {
+        "loaded": _loaded_model_id is not None,
+        "model_id": _loaded_model_id,
+        "loading": _model_loading,
+    }
+
+
+@app.post("/v1/models/load")
+async def load_model(req: LoadRequest):
+    """載入指定模型到記憶體。
+
+    使用 mlx-lm 的 load() 載入模型權重與 tokenizer。
+    支援本地路徑或 HuggingFace repo_id。
+    """
+    global _loaded_model, _loaded_tokenizer, _loaded_model_id, _model_loading
+
+    if _model_loading:
+        return {"status": "error", "message": "模型正在載入中，請稍後再試"}
+
+    repo_id = req.repo_id
+
+    # 如果已載入同一模型，直接回傳
+    if _loaded_model_id == repo_id:
+        return {"status": "ok", "message": f"模型 {repo_id} 已經載入", "model_id": repo_id}
+
+    # 先卸載舊模型
+    if _loaded_model is not None:
+        _loaded_model = None
+        _loaded_tokenizer = None
+        _loaded_model_id = None
+        import gc; gc.collect()
+
+    _model_loading = True
+    try:
+        # 優先查找本地下載的模型
+        local_path = os.path.join(MODELS_DIR, repo_id)
+        model_path = local_path if os.path.exists(local_path) else repo_id
+
+        logger.info("📦 正在載入模型: %s", model_path)
+
+        from mlx_lm import load as mlx_load
+
+        loop = asyncio.get_running_loop()
+        model, tokenizer = await loop.run_in_executor(
+            None, lambda: mlx_load(model_path)
+        )
+
+        target_layers_attr = getattr(model, "model", model)
+        if hasattr(target_layers_attr, "layers"):
+            total_layers = len(target_layers_attr.layers)
+
+            # 動態分配給 Worker
+            if DISCOVERY_MODE == "auto" and _listener is not None:
+                worker_base_urls = _listener.get_nodes_base_urls()
+            else:
+                worker_base_urls = [u.replace("/forward", "") for u in _MANUAL_NODE_URLS]
+
+            node_count = len(worker_base_urls)
+            if node_count > 0:
+                layers_per_node = total_layers // node_count
+                
+                logger.info("📡 發現 %d 個 Worker 節點，準備佈署 %d 層網路...", node_count, total_layers)
+                tasks = []
+                for i, base_url in enumerate(worker_base_urls):
+                    start = i * layers_per_node
+                    end = total_layers if i == node_count - 1 else (i + 1) * layers_per_node
+                    
+                    # 平行送出載入要求
+                    req_data = {"repo_id": repo_id, "start_layer": start, "end_layer": end}
+                    tasks.append(
+                        loop.run_in_executor(
+                            None, 
+                            lambda u=base_url, d=req_data: requests.post(
+                                f"{u}/load", json=d, timeout=300
+                            )
+                        )
+                    )
+                
+                # 等待所有 Worker 載入完成
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for res in results:
+                    if isinstance(res, Exception):
+                        raise RuntimeError(f"節點載入失敗: {res}")
+                    elif res.status_code != 200:
+                        raise RuntimeError(f"節點載入失敗 ({res.status_code}): {res.text}")
+
+                logger.info("✅ 所有 Worker 節點已載入負責的神經網路層，記憶體分配完成。")
+                
+                # 替換 Coordinator 的模型架構，拔除真實權重，並植入單一網路代理層
+                target_layers_attr.layers = [NetworkSwarmLayer("shared_chat_session")]
+                import gc
+                gc.collect()
+            else:
+                logger.warning("⚠️ 沒有發現任何 Worker 節點，將在 Coordinator 上執行單機推理。")
+        else:
+            logger.warning("⚠️ 該模型未偵測到標準 layers 結構，將嘗試單機推理。")
+
+        _loaded_model = model
+        _loaded_tokenizer = tokenizer
+        _loaded_model_id = repo_id
+
+        logger.info("✅ 模型 %s 載入完成！", repo_id)
+        return {"status": "ok", "message": f"模型 {repo_id} 載入完成", "model_id": repo_id}
+
+    except Exception as e:
+        logger.error("❌ 模型載入失敗: %s", e)
+        return {"status": "error", "message": f"模型載入失敗: {e}"}
+    finally:
+        _model_loading = False
+
+
+@app.post("/v1/models/unload")
+async def unload_model():
+    """卸載目前模型，釋放記憶體。"""
+    global _loaded_model, _loaded_tokenizer, _loaded_model_id
+
+    if _loaded_model is None:
+        return {"status": "ok", "message": "沒有載入中的模型"}
+
+    old_id = _loaded_model_id
+    _loaded_model = None
+    _loaded_tokenizer = None
+    _loaded_model_id = None
+
+    import gc
+    gc.collect()
+
+    # 發送 Unload 給所有 Worker
+    if DISCOVERY_MODE == "auto" and _listener is not None:
+        worker_base_urls = _listener.get_nodes_base_urls()
+    else:
+        worker_base_urls = [u.replace("/forward", "") for u in _MANUAL_NODE_URLS]
+
+    if worker_base_urls:
+        def _unload_req(u):
+            try:
+                requests.post(f"{u}/unload", timeout=10)
+            except Exception as e:
+                logger.warning("⚠️ 通知節點 %s 卸載失敗: %s", u, e)
+                
+        loop = asyncio.get_running_loop()
+        for u in worker_base_urls:
+            asyncio.create_task(loop.run_in_executor(None, _unload_req, u))
+
+    logger.info("🗑️ 模型 %s 已卸載，記憶體已釋放", old_id)
+    return {"status": "ok", "message": f"模型 {old_id} 已卸載"}
 
 
 @app.get("/v1/models/search")
@@ -400,54 +605,86 @@ async def verify_api_key(authorization: str = Header(None)):
     dependencies=[Depends(verify_api_key)],
 )
 async def chat_completions(req: ChatCompletionRequest):
-    """
-    接收 OpenAI 格式的對話請求，將其轉為特徵矩陣後丟入 Swarm 叢集中進行分散式推論。
-    """
+    """接收 OpenAI 格式的對話請求，使用 mlx-lm 進行真實推理。"""
     if not req.messages:
         raise HTTPException(status_code=400, detail="Messages array cannot be empty")
 
+    if _loaded_model is None or _loaded_tokenizer is None:
+        raise HTTPException(
+            status_code=503,
+            detail="尚未載入模型。請先透過 /v1/models/load 載入模型。",
+        )
+
     prompt = req.messages[-1].content
-    logger.info("🔗 [Gateway] 收到外部 API 請求: '%s'", prompt)
+    logger.info("🔗 [Gateway] 收到 API 請求: '%s' (模型: %s)", prompt, _loaded_model_id)
 
-    current_states = text_to_embeddings(prompt)
-    generated_blocks = 0
+    try:
+        from mlx_lm import generate as mlx_generate
 
-    # PoC 階段: 將 max_tokens 當作迴圈輪數來模擬長時間運算
-    blocks_to_generate = min(req.max_tokens, 10)
-
-    for i in range(1, blocks_to_generate + 1):
-        block_name = f"Token_Block_{i}"
-        current_states = generate_step(block_name, current_states)
-        if current_states is None:
-            raise HTTPException(
-                status_code=500, detail="叢集運算中斷，請檢查 Worker 節點狀態"
+        # 建構對話格式（如果 tokenizer 支援 chat template）
+        messages = [{"role": m.role, "content": m.content} for m in req.messages]
+        if hasattr(_loaded_tokenizer, "apply_chat_template"):
+            formatted_prompt = _loaded_tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
             )
-        generated_blocks += 1
+        else:
+            formatted_prompt = prompt
 
-    # 實務上這裡會將 current_states 通過 LM Head 轉換為文字，目前以模擬字串代替
-    active_urls = get_active_node_urls()
-    mock_reply = (
-        f"這是 MLX-Swarm-Cache 產生的測試回應。\n"
-        f"成功穿越了 {len(active_urls)} 個節點，經過 {generated_blocks} 輪推論接力完成！"
-    )
+        max_tokens = min(req.max_tokens, 2048)
+        start_time = time.time()
+        
+        session_id = f"chatcmpl-{uuid.uuid4().hex}"
 
-    return ChatCompletionResponse(
-        id=f"chatcmpl-{uuid.uuid4().hex}",
-        created=int(time.time()),
-        model=req.model,
-        choices=[
-            Choice(
-                index=0,
-                message=ChatMessage(role="assistant", content=mock_reply),
-                finish_reason="stop",
-            )
-        ],
-        usage=Usage(
-            prompt_tokens=len(prompt),
-            completion_tokens=generated_blocks,
-            total_tokens=len(prompt) + generated_blocks,
-        ),
-    )
+        # 如果我們是分散式架構下的 NetworkSwarmLayer，動態注入 session_id 來分離對話序列的 Cache
+        target_layers_attr = getattr(_loaded_model, "model", _loaded_model)
+        if hasattr(target_layers_attr, "layers") and target_layers_attr.layers:
+            if isinstance(target_layers_attr.layers[0], NetworkSwarmLayer):
+                target_layers_attr.layers[0].session_id = session_id
+
+        loop = asyncio.get_running_loop()
+        reply = await loop.run_in_executor(
+            None,
+            lambda: mlx_generate(
+                _loaded_model,
+                _loaded_tokenizer,
+                prompt=formatted_prompt,
+                max_tokens=max_tokens,
+                verbose=False,
+            ),
+        )
+
+        gen_time = time.time() - start_time
+        # 粗略估算 token 數
+        prompt_tokens = len(formatted_prompt.split())
+        completion_tokens = len(reply.split())
+
+        logger.info(
+            "✨ 推理完成！(耗時: %.2f s, 產生 %d tokens)",
+            gen_time, completion_tokens,
+        )
+
+        return ChatCompletionResponse(
+            id=f"chatcmpl-{uuid.uuid4().hex}",
+            created=int(time.time()),
+            model=_loaded_model_id or req.model,
+            choices=[
+                Choice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content=reply),
+                    finish_reason="stop",
+                )
+            ],
+            usage=Usage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            ),
+        )
+    except Exception as e:
+        import traceback
+        full_trace = traceback.format_exc()
+        logger.error("❌ 推理失敗: %s\n%s", e, full_trace)
+        raise HTTPException(status_code=500, detail=f"推理失敗: {e}") from e
 
 # 掛載網頁管理前端 (必須在所有 API 靜態路由宣告之後)
 _WEB_DIR = pathlib.Path(__file__).resolve().parent.parent / "web"

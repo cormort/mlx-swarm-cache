@@ -6,9 +6,8 @@ announcer.py — Worker 節點 mDNS 廣播器
 
 廣播內容包含：
   - node_id:     節點唯一識別名稱
-  - start_layer: 本節點負責的起始層
-  - end_layer:   本節點負責的結束層
   - port:        本節點監聽的 HTTP Port
+  - status:      節點狀態 (idle/loaded)
 
 生命週期：
   announcer = SwarmAnnouncer(...)
@@ -35,21 +34,15 @@ class SwarmAnnouncer:
         self,
         node_id: str,
         port: int,
-        start_layer: int,
-        end_layer: int,
     ) -> None:
         """初始化廣播器。
 
         Args:
             node_id: 節點唯一識別名稱（例如 "mac_mini_m4"）。
             port: Worker HTTP 服務監聽的 Port。
-            start_layer: 本節點負責的起始神經網路層索引。
-            end_layer: 本節點負責的結束神經網路層索引（不含）。
         """
         self.node_id = node_id
         self.port = port
-        self.start_layer = start_layer
-        self.end_layer = end_layer
 
         self._zeroconf: Zeroconf | None = None
         self._info: ServiceInfo | None = None
@@ -71,15 +64,14 @@ class SwarmAnnouncer:
             port=self.port,
             properties={
                 "node_id": self.node_id,
-                "start_layer": str(self.start_layer),
-                "end_layer": str(self.end_layer),
+                "status": "idle",
             },
         )
 
         self._zeroconf.register_service(self._info)
         logger.info(
-            "📡 [%s] mDNS 廣播已啟動 (IP: %s, Port: %d, Layers: %d-%d)",
-            self.node_id, local_ip, self.port, self.start_layer, self.end_layer - 1,
+            "📡 [%s] mDNS 廣播已啟動 (IP: %s, Port: %d)",
+            self.node_id, local_ip, self.port,
         )
 
     def unregister(self) -> None:

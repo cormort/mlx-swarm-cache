@@ -7,7 +7,6 @@ test_web_ui.py — 驗證 Web UI 路由與模型管理 API
   3. /v1/models/download 能觸發背景下載任務
 """
 
-import os
 
 import pytest
 from fastapi.testclient import TestClient

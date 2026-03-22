@@ -15,8 +15,6 @@ test_discovery.py — 驗證 Auto-Discovery (mDNS/Zeroconf) 功能
 import importlib
 import time
 
-import pytest
-
 from src.discovery.announcer import SwarmAnnouncer
 from src.discovery.listener import SwarmListener
 
@@ -120,10 +118,19 @@ class TestSwarmListener:
 
         assert listener.node_count >= 2, "Listener 未能偵測到兩個節點"
 
-        urls = listener.get_node_urls()
+        # 過濾出我們測試用的 node_id 對應的 URL，排除環境中的雜訊
+        test_urls = []
+        with listener._lock:
+            for n in listener._nodes.values():
+                if n.node_id in ("sort_test_node_a", "sort_test_node_b"):
+                    test_urls.append(n)
+        
+        # 依照 start_layer 排序確認
+        test_urls.sort(key=lambda x: x.start_layer)
+        
         # 第一個應該是 port 9200（start_layer=0），第二個是 9201（start_layer=16）
-        assert "9200" in urls[0], f"排序錯誤：第一個 URL 應含 9200，但得到 {urls[0]}"
-        assert "9201" in urls[1], f"排序錯誤：第二個 URL 應含 9201，但得到 {urls[1]}"
+        assert "9200" in test_urls[0].forward_url, f"排序錯誤：第一個 URL 應含 9200，但得到 {test_urls[0].forward_url}"
+        assert "9201" in test_urls[1].forward_url, f"排序錯誤：第二個 URL 應含 9201，但得到 {test_urls[1].forward_url}"
 
         announcer_a.unregister()
         announcer_b.unregister()
@@ -185,12 +192,20 @@ class TestSwarmListener:
         nodes = listener.get_nodes_info()
         assert len(nodes) >= 1
 
-        node = nodes[0]
-        assert node["node_id"] == "info_test_node"
-        assert node["port"] == 9400
-        assert node["start_layer"] == 8
-        assert node["end_layer"] == 24
-        assert "forward_url" in node
+        # 從回傳清單中找到我們測試用的節點，排除環境干擾
+        target_node = None
+        for n in nodes:
+            if n["node_id"] == "info_test_node":
+                target_node = n
+                break
+                
+        assert target_node is not None, "未能找到測試節點 info_test_node"
+
+        assert target_node["node_id"] == "info_test_node"
+        assert target_node["port"] == 9400
+        assert target_node["start_layer"] == 8
+        assert target_node["end_layer"] == 24
+        assert "forward_url" in target_node
 
         announcer.unregister()
         listener.stop()

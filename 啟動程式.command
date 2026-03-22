@@ -39,17 +39,13 @@ cleanup() {
 # 捕捉中斷訊號 (Ctrl+C 或是終端機關閉)
 trap cleanup SIGINT SIGTERM EXIT
 
-echo "🚀 [1/3] 啟動 Worker Node 1 (負責 0-16 層, Port: 8000)..."
+echo "🚀 [1/3] 啟動 Worker Node 1 (Port: 8000)..."
 export NODE_ID="mac_mini_m4_local"
-export START_LAYER=0
-export END_LAYER=16
 export PORT=8000
 .venv/bin/python -m src.node.api_server &
 
-echo "🚀 [2/3] 啟動 Worker Node 2 (負責 16-32 層, Port: 8001)..."
+echo "🚀 [2/3] 啟動 Worker Node 2 (Port: 8001)..."
 export NODE_ID="macbook_air_local"
-export START_LAYER=16
-export END_LAYER=32
 export PORT=8001
 .venv/bin/python -m src.node.api_server &
 

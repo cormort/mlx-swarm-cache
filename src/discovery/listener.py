@@ -18,7 +18,6 @@ listener.py — Coordinator mDNS 監聽器
 """
 
 import logging
-import socket
 import threading
 
 from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
@@ -36,14 +35,16 @@ class _NodeInfo:
         node_id: str,
         host: str,
         port: int,
-        start_layer: int,
-        end_layer: int,
+        status: str = "idle",
     ) -> None:
         self.node_id = node_id
         self.host = host
         self.port = port
-        self.start_layer = start_layer
-        self.end_layer = end_layer
+        self.status = status
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.host}:{self.port}"
 
     @property
     def forward_url(self) -> str:
@@ -56,8 +57,8 @@ class _NodeInfo:
             "node_id": self.node_id,
             "host": self.host,
             "port": self.port,
-            "start_layer": self.start_layer,
-            "end_layer": self.end_layer,
+            "status": self.status,
+            "base_url": self.base_url,
             "forward_url": self.forward_url,
         }
 
@@ -94,12 +95,7 @@ class SwarmListener(ServiceListener):
             return
 
         node_id = self._decode_property(info.properties, "node_id", name)
-        start_layer = int(
-            self._decode_property(info.properties, "start_layer", "0")
-        )
-        end_layer = int(
-            self._decode_property(info.properties, "end_layer", "0")
-        )
+        status = self._decode_property(info.properties, "status", "idle")
 
         # 解析 IP 位址 (安全寫法：支援 IPv4 與 IPv6)
         parsed_ips = info.parsed_addresses()
@@ -114,16 +110,15 @@ class SwarmListener(ServiceListener):
             node_id=node_id,
             host=host,
             port=port,
-            start_layer=start_layer,
-            end_layer=end_layer,
+            status=status,
         )
 
         with self._lock:
             self._nodes[name] = node
 
         logger.info(
-            "🟢 發現新節點: [%s] (%s:%d, Layers: %d-%d)",
-            node_id, host, port, start_layer, end_layer - 1,
+            "🟢 發現新節點: [%s] (%s:%d, Status: %s)",
+            node_id, host, port, status
         )
 
     def remove_service(self, zc: Zeroconf, type_: str, name: str) -> None:
@@ -141,15 +136,15 @@ class SwarmListener(ServiceListener):
     # ── 公開 API ────────────────────────────────────────────────────────
 
     def get_node_urls(self) -> list[str]:
-        """取得依 start_layer 排序的 Worker 節點 Forward URL 清單。
+        """取得依 node_id 排序的 Worker 節點 Forward URL 清單。
 
         Returns:
-            依照神經網路層順序排列的 URL 清單，例如：
+            依照節點名稱順序排列的 URL 清單，例如：
             ["http://192.168.1.10:8000/forward", "http://192.168.1.11:8001/forward"]
         """
         with self._lock:
             sorted_nodes = sorted(
-                self._nodes.values(), key=lambda n: n.start_layer
+                self._nodes.values(), key=lambda n: n.node_id
             )
             return [n.forward_url for n in sorted_nodes]
 
@@ -157,13 +152,21 @@ class SwarmListener(ServiceListener):
         """取得所有已偵測到的節點詳細資訊。
 
         Returns:
-            依照 start_layer 排序的節點資訊字典清單。
+            依照 node_id 排序的節點資訊字典清單。
         """
         with self._lock:
             sorted_nodes = sorted(
-                self._nodes.values(), key=lambda n: n.start_layer
+                self._nodes.values(), key=lambda n: n.node_id
             )
             return [n.to_dict() for n in sorted_nodes]
+
+    def get_nodes_base_urls(self) -> list[str]:
+        """取得所有節點的 Base URL，供 Coordinator 呼叫 /load 使用。"""
+        with self._lock:
+            sorted_nodes = sorted(
+                self._nodes.values(), key=lambda n: n.node_id
+            )
+            return [n.base_url for n in sorted_nodes]
 
     def remove_node_by_url(self, url: str) -> None:
         """將指定 URL 的殭屍節點強制從清單中剔除。
