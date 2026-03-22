@@ -77,6 +77,7 @@ class NetworkSwarmLayer(nn.Module):
         # 欺騙 mlx-lm 的 make_prompt_cache 等內部檢測方法
         self.use_sliding = False
         self.use_sliding_window = False
+        self.is_linear = False
 
     def __call__(self, x, mask=None, cache=None):
         # 將 x 送入叢集進行接力傳播
