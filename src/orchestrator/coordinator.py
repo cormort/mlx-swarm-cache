@@ -439,6 +439,12 @@ async def load_model(req: LoadRequest):
                 except AttributeError:
                     logger.warning("模型架構的 layers 可能是純 Tuple 或無法 inplace 修改，嘗試覆蓋隱藏屬性 _layers")
                     target_layers_attr._layers = [NetworkSwarmLayer("shared_chat_session")]
+                
+                # Qwen 2 等模型使用 fa_idx 來定位 Flash Attention 的快取游標
+                # 因為現在 layers 長度為 1，fa_idx 必須歸零，避免 IndexError
+                if hasattr(target_layers_attr, "fa_idx"):
+                    target_layers_attr.fa_idx = 0
+                
                 import gc
                 gc.collect()
             else:
