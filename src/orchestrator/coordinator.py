@@ -433,7 +433,11 @@ async def load_model(req: LoadRequest):
                 logger.info("✅ 所有 Worker 節點已載入負責的神經網路層，記憶體分配完成。")
                 
                 # 替換 Coordinator 的模型架構，拔除真實權重，並植入單一網路代理層
-                target_layers_attr.layers = [NetworkSwarmLayer("shared_chat_session")]
+                try:
+                    target_layers_attr.layers[:] = [NetworkSwarmLayer("shared_chat_session")]
+                except AttributeError:
+                    logger.warning("模型架構的 layers 可能是純 Tuple 或無法 inplace 修改，嘗試覆蓋隱藏屬性 _layers")
+                    target_layers_attr._layers = [NetworkSwarmLayer("shared_chat_session")]
                 import gc
                 gc.collect()
             else:
